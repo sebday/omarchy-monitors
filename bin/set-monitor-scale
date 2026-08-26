@@ -1,0 +1,48 @@
+#!/bin/bash
+# Set Hyprland scale for a named output without moving focus. Preserves position.
+
+set -euo pipefail
+
+monitor="${1:-}"
+requested="${2:-}"
+
+if [[ -z $monitor || -z $requested ]]; then
+  echo "Usage: set-monitor-scale MONITOR SCALE" >&2
+  exit 1
+fi
+
+if [[ ! $monitor =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "Refusing unsafe monitor name" >&2
+  exit 1
+fi
+
+clean_scale() {
+  awk -v scale="$1" -v width="$2" -v height="$3" '
+    function gcd(a, b, t) { while (b) { t = a % b; a = b; b = t } return a }
+    BEGIN {
+      g = gcd(width * 120, height * 120)
+      k = int(scale * 120 + 0.5)
+      if (k > g) k = g
+      while (g % k != 0) k++
+      printf "%g\n", k / 120
+    }'
+}
+
+monitor_info="$(hyprctl monitors -j | jq -e -c --arg name "$monitor" '.[] | select(.name == $name)')"
+name="$(echo "$monitor_info" | jq -r '.name')"
+width="$(echo "$monitor_info" | jq -r '.width')"
+height="$(echo "$monitor_info" | jq -r '.height')"
+refresh_rate="$(echo "$monitor_info" | jq -r '.refreshRate')"
+x="$(echo "$monitor_info" | jq -r '.x')"
+y="$(echo "$monitor_info" | jq -r '.y')"
+
+new_scale="$(clean_scale "$requested" "$width" "$height")"
+
+hyprctl eval "hl.monitor({ output = \"$name\", mode = \"${width}x${height}@${refresh_rate}\", position = \"${x}x${y}\", scale = $new_scale })" >/dev/null
+
+monitor_lua="$HOME/.config/hypr/monitors.lua"
+if [[ -f $monitor_lua ]]; then
+  sed -i -E \
+    "s|^(hl\\.monitor\\(\\{ output = \"$name\", mode = \"[^\"]+\", position = \"[^\"]+\", scale = )[^ ]+( \\}\\))|\\1${new_scale}\\2|" \
+    "$monitor_lua"
+fi
