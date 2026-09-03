@@ -101,8 +101,8 @@ Item {
   // many `showHistory` can replay.
   readonly property int historyLimit: 10
 
-  readonly property int lowPopupDuration: 5000
-  readonly property int normalPopupDuration: 8000
+  readonly property int lowPopupDuration: 3000
+  readonly property int normalPopupDuration: 5000
   readonly property int maxPopupDuration: 30000
 
   function durationFor(urgency, expireTimeout) {
