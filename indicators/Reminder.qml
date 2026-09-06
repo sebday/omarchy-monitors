@@ -39,10 +39,20 @@ BarIndicator {
 
   Process {
     id: jsonProc
+    onStarted: { stdoutBuf = ""; stderrBuf = "" }
+
+    property string stdoutBuf: ""
+    property string stderrBuf: ""
     command: ["omarchy-reminder", "show", "--json"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.update(text)
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        jsonProc.stdoutBuf += chunk
+        if (jsonProc.stdoutBuf.length > 262144) {
+          jsonProc.signal(15)
+          jsonProc.stdoutBuf = ""
+        }
+      }
     }
     onExited: function(exitCode) {
       if (exitCode !== 0) {

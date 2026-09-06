@@ -1,4 +1,5 @@
 import QtQuick
+import Quickshell
 import Quickshell.Io
 import qs.Ui
 
@@ -36,8 +37,9 @@ BarIndicator {
   }
 
   onPressed: function() {
-    if (root.bar) {
-      root.bar.run(root.recording ? "omarchy-capture-screenrecording --stop-recording" : "omarchy-menu toggle trigger.capture.screenrecord")
-    }
+    if (root.recording)
+      Quickshell.execDetached(["omarchy-capture-screenrecording", "--stop-recording"])
+    else
+      Quickshell.execDetached(["omarchy-menu", "toggle", "trigger.capture.screenrecord"])
   }
 }

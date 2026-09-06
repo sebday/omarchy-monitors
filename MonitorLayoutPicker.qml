@@ -190,9 +190,20 @@ Item {
 
   Process {
     id: workspaceRulesProc
-    command: ["bash", "-lc", "hyprctl workspacerules -j 2>/dev/null"]
-    stdout: StdioCollector {
-      onStreamFinished: root.workspaceByMonitor = root.parseWorkspaceRules(text)
+    onStarted: { stdoutBuf = ""; stderrBuf = "" }
+
+    property string stdoutBuf: ""
+    property string stderrBuf: ""
+    command: ["/usr/bin/hyprctl", "workspacerules", "-j"]
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        workspaceRulesProc.stdoutBuf += chunk
+        if (workspaceRulesProc.stdoutBuf.length > 262144) {
+          workspaceRulesProc.signal(15)
+          workspaceRulesProc.stdoutBuf = ""
+        }
+      }
     }
   }
 
@@ -265,6 +276,7 @@ Item {
             width: parent.width
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
               text: monitorItem.monitorName
@@ -311,6 +323,7 @@ Item {
                       implicitHeight: wsLabel.height + root.workspacePillPadV * 2
 
                       Text {
+                        textFormat: Text.PlainText
                         id: wsLabel
                         anchors.centerIn: parent
                         text: wsId

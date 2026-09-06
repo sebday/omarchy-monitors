@@ -1,6 +1,8 @@
 import QtQuick
+import Quickshell
 import Quickshell.Io
 import qs.Ui
+import "../Model.js" as Model
 
 BarIndicator {
   id: root
@@ -11,7 +13,7 @@ BarIndicator {
   active: state === "recording"
   activeText: icon
   inactiveText: "󰍬"
-  activeTooltipText: state
+  activeTooltipText: Model.plain(state, 80)
   inactiveTooltipText: "Dictate"
 
   function update(raw) {
@@ -24,7 +26,7 @@ BarIndicator {
   }
 
   Process {
-    command: ["bash", "-c", "omarchy-voxtype-status"]
+    command: ["omarchy-voxtype-status"]
     running: true
     stdout: SplitParser {
       onRead: function(data) { root.update(data) }
@@ -32,7 +34,6 @@ BarIndicator {
   }
 
   onPressed: function() {
-    if (!root.bar) return
-    root.bar.run("omarchy-voxtype-config")
+    Quickshell.execDetached(["omarchy-voxtype-config"])
   }
 }

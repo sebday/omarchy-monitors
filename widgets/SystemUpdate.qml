@@ -17,7 +17,7 @@ BarWidget {
   function clear() { updateAvailable = false }
 
   function runUpdate() {
-    if (root.bar) root.bar.run("omarchy-launch-floating-terminal-with-presentation omarchy-update")
+    Quickshell.execDetached(["omarchy-launch-floating-terminal-with-presentation", "omarchy-update"])
   }
 
   visible: updateAvailable

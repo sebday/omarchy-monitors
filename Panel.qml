@@ -312,9 +312,11 @@ Panel {
   }
 
   function setScale(scale) {
-    var monitor = scaleTargetMonitor || focusedMonitor
-    if (!monitor) return
-    actionProc.command = ["bash", setScaleScript, monitor, scale]
+    var monitor = String(scaleTargetMonitor || focusedMonitor || "")
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(monitor)) return
+    var s = String(scale)
+    if (scalePresets.indexOf(s) < 0 && !/^[1-9][0-9]*(\.[0-9]+)?$/.test(s)) return
+    actionProc.command = ["bash", setScaleScript, monitor, s]
     if (!actionProc.running) actionProc.running = true
   }
 
@@ -391,11 +393,23 @@ Panel {
 
   Process {
     id: stateProc
+    onStarted: { stdoutBuf = ""; stderrBuf = "" }
+
+    property string stdoutBuf: ""
+    property string stderrBuf: ""
     command: ["bash", root.monitorStateScript]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        var lines = String(text || "").split("\n")
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        stateProc.stdoutBuf += chunk
+        if (stateProc.stdoutBuf.length > 262144) {
+          stateProc.signal(15)
+          stateProc.stdoutBuf = ""
+        }
+      }
+    }
+      onExited: function(exitCode) {
+      var lines = String(stdoutBuf || "").split("\n")
         root.internalMonitor = String(lines[0] || "").trim()
         root.externalMonitor = String(lines[1] || "").trim()
         root.internalEnabled = String(lines[2] || "").trim() !== ""
@@ -404,13 +418,25 @@ Panel {
         root.monitorScale = root.normalizeScale(String(lines[5] || "").trim())
         root.updateDisplays(String(lines[6] || "[]").trim())
         root.ensureScaleTarget()
-      }
     }
   }
 
   Process {
     id: actionProc
-    stdout: StdioCollector { waitForEnd: true }
+    onStarted: { stdoutBuf = ""; stderrBuf = "" }
+
+    property string stdoutBuf: ""
+    property string stderrBuf: ""
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        actionProc.stdoutBuf += chunk
+        if (actionProc.stdoutBuf.length > 262144) {
+          actionProc.signal(15)
+          actionProc.stdoutBuf = ""
+        }
+      }
+    }
     onRunningChanged: if (!running) root.refresh()
   }
 
@@ -419,7 +445,20 @@ Panel {
   // nothing to refresh here.
   Process {
     id: textScaleProc
-    stdout: StdioCollector { waitForEnd: true }
+    onStarted: { stdoutBuf = ""; stderrBuf = "" }
+
+    property string stdoutBuf: ""
+    property string stderrBuf: ""
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        textScaleProc.stdoutBuf += chunk
+        if (textScaleProc.stdoutBuf.length > 262144) {
+          textScaleProc.signal(15)
+          textScaleProc.stdoutBuf = ""
+        }
+      }
+    }
   }
 
   // Clears the hover-suppression flag once the reflow triggered by a text-size
@@ -500,6 +539,7 @@ Panel {
             implicitHeight: Math.max(heroIcon.implicitHeight, heroLabels.implicitHeight)
 
             Text {
+              textFormat: Text.PlainText
               id: heroIcon
               text: root.displays.length > 1 ? "󰍺" : "󰍹"
               color: root.bar.foreground
@@ -518,6 +558,7 @@ Panel {
               spacing: Style.space(2)
 
               Text {
+                textFormat: Text.PlainText
                 text: "Display"
                 color: root.bar.foreground
                 font.family: root.bar.fontFamily
@@ -528,6 +569,7 @@ Panel {
               }
 
               Text {
+                textFormat: Text.PlainText
                 id: heroLabel
                 text: {
                   var monitor = root.scaleTargetMonitor || root.focusedMonitor
@@ -568,6 +610,7 @@ Panel {
               }
 
               Text {
+                textFormat: Text.PlainText
                 id: textSizePx
                 text: (textSizeSlider.dragging
                        ? root.textSizeStops[Math.round(textSizeSlider.liveValue)]
@@ -641,6 +684,7 @@ Panel {
               // Name the monitor SCALE targets, since it only applies to the
               // focused one.
               Text {
+                textFormat: Text.PlainText
                 id: scaleMonitor
                 text: root.scaleTargetMonitor || root.focusedMonitor
                 visible: (root.scaleTargetMonitor || root.focusedMonitor) !== ""

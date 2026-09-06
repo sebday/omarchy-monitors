@@ -183,7 +183,7 @@ BorderSurface {
           Layout.topMargin: Style.space(2)
           visible: root.sanitizedBody.length > 0
           text: root.styledBody
-          textFormat: Text.StyledText
+          textFormat: Text.PlainText
           font.family: root.fontFamily || Style.font.family
           color: root.bodyColor
           font.pixelSize: Style.font.title
@@ -210,6 +210,7 @@ BorderSurface {
     Behavior on opacity { NumberAnimation { duration: 100 } }
 
     Text {
+      textFormat: Text.PlainText
       anchors.centerIn: parent
       text: "✕"
       color: closeArea.containsMouse ? Color.notifications.text : root.dimColor

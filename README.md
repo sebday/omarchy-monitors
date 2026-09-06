@@ -26,3 +26,15 @@ omarchy-shell shell toggle evo.monitors '{}'
 omarchy-shell notifications toggleDnd
 omarchy-shell notifications showHistory
 ```
+
+## Removing
+
+```bash
+omarchy plugin remove evo.monitors
+```
+
+That deletes the plugin directory. It does not delete:
+
+- `~/.local/state/omarchy/notifications/`
+
+Network: none.

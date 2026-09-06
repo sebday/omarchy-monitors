@@ -5,6 +5,7 @@ import Quickshell.Io
 import qs.Ui
 import qs.Commons
 import "KeyboardLayoutModel.js" as KeyboardLayoutModel
+import "../Model.js" as Model
 
 BarWidget {
   id: root
@@ -72,8 +73,9 @@ BarWidget {
   // layout leaves the button reading as the furthest along, and the label
   // follows the button.
   function cycleLayout() {
-    if (!root.keyboardName || !root.bar) return
-    root.bar.run("hyprctl switchxkblayout " + Util.shellQuote(root.keyboardName) + " next")
+    var name = String(root.keyboardName || "")
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(name)) return
+    Quickshell.execDetached(["/usr/bin/hyprctl", "switchxkblayout", name, "next"])
     refreshTimer.restart()
   }
 
@@ -103,6 +105,10 @@ BarWidget {
 
   Process {
     id: queryProc
+    onStarted: { stdoutBuf = ""; stderrBuf = "" }
+
+    property string stdoutBuf: ""
+    property string stderrBuf: ""
     command: ["hyprctl", "-j", "devices"]
     onRunningChanged: {
       if (running) {
@@ -113,12 +119,20 @@ BarWidget {
       stallTimer.stop()
       if (root.refreshPending) root.refresh()
     }
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        let listed
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        queryProc.stdoutBuf += chunk
+        if (queryProc.stdoutBuf.length > 262144) {
+          queryProc.signal(15)
+          queryProc.stdoutBuf = ""
+        }
+      }
+    }
+      onExited: function(exitCode) {
+      let listed
         try {
-          listed = JSON.parse(text || "{}").keyboards
+          listed = JSON.parse(stdoutBuf || "{}").keyboards
         } catch (e) {
           return
         }
@@ -150,7 +164,6 @@ BarWidget {
         root.keyboardName = String(kb.name || "")
         root.multipleLayouts = kb.layout === undefined || String(kb.layout).indexOf(",") !== -1
         root.layoutFull = kb.active_keymap
-      }
     }
   }
 
@@ -160,10 +173,20 @@ BarWidget {
   // package and set just as well, so load them or those labels lose their code.
   Process {
     id: briefsProc
+    onStarted: { stdoutBuf = ""; stderrBuf = "" }
+
+    property string stdoutBuf: ""
+    property string stderrBuf: ""
     command: ["xkbcli", "list", "--load-exotic"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.layoutBriefs = KeyboardLayoutModel.layoutBriefs(text)
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        briefsProc.stdoutBuf += chunk
+        if (briefsProc.stdoutBuf.length > 262144) {
+          briefsProc.signal(15)
+          briefsProc.stdoutBuf = ""
+        }
+      }
     }
   }
 
@@ -212,7 +235,7 @@ BarWidget {
     text: root.layoutLabel
     fontSize: Style.font.caption
     horizontalMargin: 6
-    tooltipText: root.layoutFull
+    tooltipText: Model.plain(root.layoutFull, 120)
     onPressed: function() { root.cycleLayout() }
   }
 }

@@ -23,7 +23,9 @@ Item {
   // (the notifications received, the last-set DND preference), not
   // regeneratable cache that a `rm -rf ~/.cache` should wipe.
   readonly property string stateDir: home + "/.local/state/omarchy/"
-  readonly property string settingsPath: stateDir + "notifications.json"
+  readonly property string settingsHelper: Qt.resolvedUrl("bin/notif-settings").toString().replace("file://", "")
+  readonly property string filesHelper: Qt.resolvedUrl("bin/notif-files").toString().replace("file://", "")
+  readonly property var filesHelperCmd: ["/usr/bin/python3", "-I", filesHelper]
   // One file per on-screen popup, so live toasts survive shell restarts.
   // A file exists exactly as long as its popup is showing: written when the
   // toast appears, moved into historyDir when it expires, is dismissed, or is
@@ -461,8 +463,8 @@ Item {
   // Done callback of the job popupFileProc is currently running.
   property var runningPopupFileJobDone: null
 
-  function enqueuePopupFileJob(command, done) {
-    popupFileQueue = popupFileQueue.concat([{ command: command, done: done || null }])
+  function enqueuePopupFileJob(command, done, stdin) {
+    popupFileQueue = popupFileQueue.concat([{ command: command, done: done || null, stdin: stdin || "" }])
     runNextPopupFileJob()
   }
 
@@ -483,6 +485,8 @@ Item {
       return
     }
 
+    popupFileProc.payload = job.stdin || ""
+    popupFileProc.stdinEnabled = popupFileProc.payload !== ""
     popupFileProc.command = job.command
     service.runningPopupFileJobDone = job.done || null
     popupFileProc.running = true
@@ -491,6 +495,12 @@ Item {
   Process {
     id: popupFileProc
     running: false
+    property string payload: ""
+    onStarted: {
+      if (payload !== "") write(payload)
+      payload = ""
+      stdinEnabled = false
+    }
     onExited: {
       var done = service.runningPopupFileJobDone
       service.runningPopupFileJobDone = null
@@ -505,72 +515,33 @@ Item {
     }
   }
 
-  // Consumes the remaining args as from/to pairs. Bounded read into a temp
-  // file, validated, then renamed into place: the source path is
-  // sender-controlled and may grow, block, or become a FIFO mid-copy, and
-  // must neither hang the serialized queue nor fill the state dir.
-  readonly property string copyImagesScript:
-    "while (( $# >= 2 )); do\n" +
-    "  if [[ -f $1 ]] && timeout 5 head -c 5242881 -- \"$1\" > \"$2.tmp\" 2>/dev/null &&\n" +
-    "     (( $(stat -c%s -- \"$2.tmp\") <= 5242880 )); then mv -f -- \"$2.tmp\" \"$2\"; else rm -f -- \"$2.tmp\"; fi\n" +
-    "  shift 2\n" +
-    "done\n"
-
   function persistPopupFile(snapshot) {
-    // The JSON travels as an argument, not through shell interpolation, so
-    // summaries/bodies with quotes or backticks can't break the command. The
-    // mkdir guards notifications that arrive before ensureDirsProc has run.
-    // Copies run before the JSON referencing them, while the source exists.
     var persistable = NotificationLogic.persistablePopup(snapshot, imagesDir)
-    var command = ["bash", "-c",
-      "mkdir -p \"$1\" \"$2\" || exit 0\n" +
-      "dir=\"$1\" json=\"$3\" name=\"$4\"\n" +
-      "shift 4\n" +
-      copyImagesScript +
-      "printf '%s\\n' \"$json\" > \"$dir/$name\"", "--",
-      popupStateDir,
-      imagesDir,
-      NotificationLogic.serializePopup(persistable.entry, NotificationUrgency.Normal),
-      NotificationLogic.popupFileName(snapshot)]
+    var command = filesHelperCmd.concat(["persist", NotificationLogic.popupFileName(snapshot)])
     for (var i = 0; i < persistable.copies.length; i++)
       command.push(persistable.copies[i].from, persistable.copies[i].to)
-    enqueuePopupFileJob(command)
+    enqueuePopupFileJob(command, null, NotificationLogic.serializePopup(persistable.entry, NotificationUrgency.Normal))
   }
 
   function deletePopupFileFor(row) {
     if (!row) return
-    // History replays and the "no recent notifications" placeholder never
-    // had a file — rm -f on the computed paths is a harmless no-op there.
-    enqueuePopupFileJob(["bash", "-c",
-      "rm -f \"$1/$2.json\" \"$3/$2\"-*", "--",
-      popupStateDir, NotificationLogic.imageStem(row), imagesDir])
+    enqueuePopupFileJob(filesHelperCmd.concat(["delete", NotificationLogic.imageStem(row)]))
   }
 
   // ---------------------------------------------------- history
   //
   // A popup that leaves the screen keeps its file — it just moves one level
-  // down, into historyDir. Trimming happens right there in the same shell
-  // job: the names sort numerically by their leading millisecond timestamp,
-  // so everything but the newest historyLimit files is the tail to drop,
-  // image copies included. Callers set $hist, $limit and $imgs first.
-  readonly property string trimHistoryScript:
-    "ls -1 \"$hist\" 2>/dev/null | sort -n | head -n \"-$limit\" | while IFS= read -r stale; do rm -f \"$hist/$stale\" \"$imgs/${stale%.json}\"-*; done"
+  // down, into historyDir. Trimming happens in the same helper job: names
+  // sort by the leading millisecond timestamp, so everything but the newest
+  // historyLimit files is dropped, image copies included.
 
   function archivePopupFileFor(row) {
     if (!row) return
-    // A history replay or the empty-history placeholder has no file to move;
-    // the failed mv leaves the history untouched, trimming included. Image
-    // copies stay put — live and archived entries share imagesDir.
-    enqueuePopupFileJob(["bash", "-c",
-      "mkdir -p \"$1\" || exit 0\n" +
-      "hist=\"$1\" limit=\"$2\" imgs=\"$5\"\n" +
-      "mv -f \"$4/$3\" \"$1/$3\" 2>/dev/null || exit 0\n" +
-      trimHistoryScript, "--",
-      historyDir,
-      String(historyLimit),
+    enqueuePopupFileJob(filesHelperCmd.concat([
+      "archive",
       NotificationLogic.popupFileName(row),
-      popupStateDir,
-      imagesDir])
+      String(historyLimit)
+    ]))
   }
 
   // Record a notification that never made it to the screen (DND silenced it),
@@ -589,55 +560,50 @@ Item {
       return
     }
     var persistable = NotificationLogic.persistablePopup(entry, imagesDir)
-    var command = ["bash", "-c",
-      "mkdir -p \"$1\" \"$5\" || exit 0\n" +
-      "hist=\"$1\" limit=\"$2\" name=\"$3\" json=\"$4\" imgs=\"$5\"\n" +
-      "shift 5\n" +
-      copyImagesScript +
-      "printf '%s\\n' \"$json\" > \"$hist/$name\" || exit 0\n" +
-      trimHistoryScript, "--",
-      historyDir,
-      String(historyLimit),
+    var command = filesHelperCmd.concat([
+      "write-history",
       NotificationLogic.popupFileName(entry),
-      NotificationLogic.serializePopup(persistable.entry, NotificationUrgency.Normal),
-      imagesDir]
+      String(historyLimit)
+    ])
     for (var i = 0; i < persistable.copies.length; i++)
       command.push(persistable.copies[i].from, persistable.copies[i].to)
-    enqueuePopupFileJob(command, done)
+    enqueuePopupFileJob(command, done, NotificationLogic.serializePopup(persistable.entry, NotificationUrgency.Normal))
   }
 
   function clearHistory() {
-    enqueuePopupFileJob(["bash", "-c",
-      "for f in \"$1\"/*.json; do\n" +
-      "  [[ -e $f ]] || continue\n" +
-      "  stale=\"${f##*/}\"\n" +
-      "  rm -f \"$f\" \"$2/${stale%.json}\"-*\n" +
-      "done", "--", historyDir, imagesDir])
+    enqueuePopupFileJob(filesHelperCmd.concat(["clear-history"]))
   }
 
-  // A restart can kill a queued job between its cp and its JSON write,
+  // A restart can kill a queued job between its copy and its JSON write,
   // leaving copies no JSON-derived cleanup can name. Swept at startup,
   // through the queue so in-flight copies aren't mistaken for orphans.
   function sweepOrphanImages() {
-    enqueuePopupFileJob(["bash", "-c",
-      "for img in \"$3\"/*; do\n" +
-      "  [[ -e $img ]] || continue\n" +
-      "  [[ $img == *.tmp ]] && { rm -f -- \"$img\"; continue; }\n" +
-      "  stem=\"${img##*/}\"\n" +
-      "  stem=\"${stem%-*}\"\n" +
-      "  [[ -e $1/$stem.json || -e $2/$stem.json ]] || rm -f \"$img\"\n" +
-      "done", "--", popupStateDir, historyDir, imagesDir])
+    enqueuePopupFileJob(filesHelperCmd.concat(["sweep"]))
   }
 
   Process {
     id: readHistoryProc
+    onStarted: { stdoutBuf = ""; stderrBuf = "" }
+
+    property string stdoutBuf: ""
+    property string stderrBuf: ""
     running: false
+    command: ["/usr/bin/python3", "-I", service.filesHelper, "read-history"]
     // Let the file queue go again, whatever the read did — a failed or empty
     // read must not leave archives and clears parked behind it forever.
-    onExited: service.runNextPopupFileJob()
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: service.replayHistory(text)
+    onExited: {
+      service.replayHistory(stdoutBuf)
+      service.runNextPopupFileJob()
+    }
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        readHistoryProc.stdoutBuf += chunk
+        if (readHistoryProc.stdoutBuf.length > 262144) {
+          readHistoryProc.signal(15)
+          readHistoryProc.stdoutBuf = ""
+        }
+      }
     }
   }
 
@@ -663,8 +629,6 @@ Item {
 
   function startHistoryRead() {
     service.historyReadQueued = false
-    readHistoryProc.command = ["bash", "-c",
-      "awk 1 \"$1\"/*.json 2>/dev/null || true", "--", historyDir]
     readHistoryProc.running = true
   }
 
@@ -732,10 +696,22 @@ Item {
 
   Process {
     id: restorePopupsProc
+    onStarted: { stdoutBuf = ""; stderrBuf = "" }
+
+    property string stdoutBuf: ""
+    property string stderrBuf: ""
     running: false
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: service.restorePopups(text)
+    command: ["/usr/bin/python3", "-I", service.filesHelper, "read-popups"]
+    onExited: service.restorePopups(stdoutBuf)
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        restorePopupsProc.stdoutBuf += chunk
+        if (restorePopupsProc.stdoutBuf.length > 262144) {
+          restorePopupsProc.signal(15)
+          restorePopupsProc.stdoutBuf = ""
+        }
+      }
     }
   }
 
@@ -799,18 +775,35 @@ Item {
 
   // ---------------------------------------------------- settings persistence
 
-  FileView {
-    id: settingsFile
-    path: service.settingsPath
-    watchChanges: false
-    atomicWrites: true
-    printErrors: false
-    onLoaded: service.loadSettings(text())
-    // First-run: the file doesn't exist yet. Without this branch,
-    // `settingsLoaded` stays false forever and `scheduleSettingsSave` becomes
-    // a no-op — so the file is never created and the DND preference vanishes
-    // on shell restart.
-    onLoadFailed: service.loadSettings("")
+  Process {
+    id: settingsReadProc
+    onStarted: { stdoutBuf = ""; stderrBuf = "" }
+    property string stdoutBuf: ""
+    property string stderrBuf: ""
+    command: ["/usr/bin/python3", "-I", service.settingsHelper, "read"]
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        settingsReadProc.stdoutBuf += chunk
+        if (settingsReadProc.stdoutBuf.length > 65536) {
+          settingsReadProc.signal(15)
+          settingsReadProc.stdoutBuf = ""
+        }
+      }
+    }
+    onExited: service.loadSettings(stdoutBuf)
+  }
+
+  Process {
+    id: settingsWriteProc
+    stdinEnabled: true
+    property string payload: ""
+    command: ["/usr/bin/python3", "-I", service.settingsHelper, "write"]
+    onStarted: {
+      write(payload)
+      payload = ""
+      stdinEnabled = false
+    }
   }
 
   Timer {
@@ -828,9 +821,8 @@ Item {
   property bool settingsLoaded: false
 
   function loadSettings(raw) {
-    // FileView can fire onLoaded more than once during startup — the implicit
-    // preload when `path` resolves, plus the explicit `settingsFile.reload()`
-    // in Component.onCompleted can both end up calling here.
+    // The helper can fire more than once during startup if the read is
+    // retried; ignore extra completions after the first hydrate.
     if (service.settingsLoaded) return
 
     var parsed = NotificationLogic.parseSettings(raw)
@@ -850,7 +842,9 @@ Item {
   }
 
   function flushSettings() {
-    settingsFile.setText(JSON.stringify({ version: 3, dnd: persisted.doNotDisturb }, null, 2) + "\n")
+    settingsWriteProc.payload = JSON.stringify({ version: 3, dnd: persisted.doNotDisturb }, null, 2) + "\n"
+    settingsWriteProc.stdinEnabled = true
+    settingsWriteProc.running = true
   }
 
   Component.onCompleted: {
@@ -859,13 +853,7 @@ Item {
     // surfaces an empty string when the file doesn't exist; loadSettings
     // handles that path.
     Qt.callLater(function() {
-      settingsFile.reload()
-      // Re-show popups that were on screen when the previous shell died.
-      // The glob-through-bash tolerates a missing/empty dir (first run).
-      // awk 1 (not cat) so a torn file missing its trailing newline can't
-      // glue itself onto the next file and take a valid popup down with it.
-      restorePopupsProc.command = ["bash", "-c",
-        "awk 1 \"$1\"/*.json 2>/dev/null || true", "--", service.popupStateDir]
+      settingsReadProc.running = true
       restorePopupsProc.running = true
       // Safe beside the restore read: it only re-persists entries whose
       // JSON exists, exactly the images the sweep keeps.

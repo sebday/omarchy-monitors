@@ -8,6 +8,7 @@ import qs.Commons
 import qs.Ui
 import "BarModel.js" as BarModel
 import "BarPlacementModel.js" as BarPlacementModel
+import "Model.js" as Model
 
 Item {
   id: root
@@ -896,6 +897,8 @@ Item {
   FileView {
     path: root.stateHome + "/omarchy/current"
     watchChanges: true
+    preload: false
+    blockAllReads: true
     printErrors: false
     onFileChanged: root.scheduleTransparentForegroundRefresh()
   }
@@ -925,7 +928,7 @@ Item {
         return
       }
       tooltipTarget = pendingTooltipTarget
-      tooltipText = pendingTooltipText
+      tooltipText = Model.plain(pendingTooltipText, 240)
       pendingTooltipTarget = null
       pendingTooltipText = ""
       tooltipTimer.restart()
@@ -961,12 +964,14 @@ Item {
   Process {
     id: barHiddenProbe
     running: true
-    command: ["bash", "-c", "[[ -f $HOME/.local/state/omarchy/toggles/bar-off ]] && echo yes || echo no"]
-    stdout: SplitParser { onRead: function(line) { root.barHidden = String(line).trim() === "yes" } }
+    command: ["/usr/bin/test", "-f", root.home + "/.local/state/omarchy/toggles/bar-off"]
+    onExited: function(exitCode) { root.barHidden = exitCode === 0 }
   }
   FileView {
     path: root.home + "/.local/state/omarchy/toggles"
     watchChanges: true
+    preload: false
+    blockAllReads: true
     printErrors: false
     onFileChanged: barHiddenProbe.running = true
   }
@@ -1116,6 +1121,7 @@ Item {
         radius: Style.cornerRadius
 
         Text {
+          textFormat: Text.PlainText
           id: tooltipLabel
           anchors.centerIn: parent
           text: root.tooltipText
@@ -1835,11 +1841,21 @@ Item {
 
     Process {
       id: customProc
+    onStarted: { stdoutBuf = ""; stderrBuf = "" }
+
+    property string stdoutBuf: ""
+    property string stderrBuf: ""
       command: ["bash", "-lc", String(customRoot.setting("exec", ""))]
-      stdout: StdioCollector {
-        waitForEnd: true
-        onStreamFinished: customRoot.update(text)
+      stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        customProc.stdoutBuf += chunk
+        if (customProc.stdoutBuf.length > 262144) {
+          customProc.signal(15)
+          customProc.stdoutBuf = ""
+        }
       }
+    }
     }
 
     Timer {

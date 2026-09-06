@@ -28,6 +28,7 @@ BarWidget {
     clip: true
 
     Text {
+      textFormat: Text.PlainText
       id: labelText
       anchors.verticalCenter: parent.verticalCenter
       anchors.left: parent.left
