@@ -49,10 +49,46 @@ Item {
   readonly property int defaultBarSize: barVertical ? Style.bar.sizeVertical : Style.bar.sizeHorizontal
   readonly property int liveBarSize: shell && shell.bar && !shell.bar.barHidden ? Math.max(0, shell.bar.barSize) : defaultBarSize
   readonly property int barClearance: liveBarSize + Style.gapsOut
-  readonly property var notificationPlacements: NotificationLogic.readNotificationPlacements(
-    shell ? shell.shellConfig : null, Quickshell.screens)
-  readonly property var barPlacements: NotificationLogic.readBarPlacements(
-    shell ? shell.shellConfig : null)
+
+  // Third-party plugins no longer receive shell.shellConfig. Read the user's
+  // shell.json directly so per-monitor notification placements still work.
+  property var userShellConfig: ({})
+  property bool userShellConfigLoaded: false
+
+  FileView {
+    id: userShellFile
+    path: service.home + "/.config/omarchy/shell.json"
+    watchChanges: true
+    printErrors: false
+    onLoaded: service.loadUserShellConfig(text())
+    onLoadFailed: service.loadUserShellConfig("")
+    onFileChanged: reload()
+  }
+
+  function loadUserShellConfig(raw) {
+    var parsed = {}
+    try {
+      var text = String(raw || "").trim()
+      var value = JSON.parse(text || "{}")
+      if (value && typeof value === "object") parsed = value
+    } catch (e) {
+      parsed = {}
+    }
+    userShellConfig = parsed
+    userShellConfigLoaded = true
+  }
+
+  readonly property var layoutConfig: {
+    var fileConfig = userShellConfigLoaded ? userShellConfig : null
+    if (fileConfig && typeof fileConfig === "object")
+      return fileConfig
+    var barConfig = shell && shell.barConfig ? shell.barConfig : null
+    return barConfig ? { bar: barConfig } : {}
+  }
+  readonly property var notificationPlacements: userShellConfigLoaded
+    ? NotificationLogic.readNotificationPlacements(layoutConfig, Quickshell.screens)
+    : []
+  readonly property var barPlacements: NotificationLogic.readBarPlacements(layoutConfig)
 
   function barClearanceForScreen(screenName) {
     var barPlacement = NotificationLogic.findBarPlacement(barPlacements, screenName)

@@ -242,12 +242,36 @@ Panel {
     return normalizeScale(scale)
   }
 
+  readonly property var monitorService: bar && bar.shell ? bar.shell.serviceFor("evo.monitors") : null
+
+  function liveBarConfig() {
+    if (bar && bar.barConfig) return bar.barConfig
+    if (bar && bar.shell && bar.shell.barConfig) return bar.shell.barConfig
+    return {}
+  }
+
   function refreshLayoutState() {
-    var shellConfig = bar && bar.shell ? bar.shell.shellConfig : null
-    var config = shellConfig || {}
-    var state = LayoutModel.readLayoutState(shellConfig)
-    root.layoutBarPlacements = BarPlacementModel.readBarPlacements(config.bar)
-    root.layoutNotificationsPlacements = state.notificationsPlacements
+    var barConfig = liveBarConfig()
+    var state = LayoutModel.readLayoutState({ bar: barConfig })
+    root.layoutBarPlacements = BarPlacementModel.readBarPlacements(barConfig)
+    if (Array.isArray(barConfig.notificationPlacements))
+      root.layoutNotificationsPlacements = state.notificationsPlacements
+    else if (monitorService && Array.isArray(monitorService.notificationPlacements))
+      root.layoutNotificationsPlacements = monitorService.notificationPlacements
+    else
+      root.layoutNotificationsPlacements = state.notificationsPlacements
+  }
+
+  Connections {
+    target: bar
+    function onBarConfigChanged() { root.refreshLayoutState() }
+  }
+
+  Connections {
+    target: root.monitorService
+    ignoreUnknownSignals: true
+    function onNotificationPlacementsChanged() { root.refreshLayoutState() }
+    function onUserShellConfigLoadedChanged() { root.refreshLayoutState() }
   }
 
   function mutateShellConfig(mutator) {
@@ -256,41 +280,40 @@ Panel {
   }
 
   function toggleBarLayout(output, position) {
-    LayoutModel.toggleBarPlacement(
+    var next = LayoutModel.toggleBarPlacementForOutput(
+      root.layoutBarPlacements, output, position)
+    LayoutModel.applyBarPlacements(
       function(mutator) { root.mutateShellConfig(mutator) },
-      root.layoutBarPlacements,
-      output,
-      position
+      next
     )
-    refreshLayoutState()
+    root.layoutBarPlacements = next
   }
 
   function toggleNotificationsLayout(output, position, align) {
     var wasActive = LayoutModel.hasNotificationAlign(
       root.layoutNotificationsPlacements, output, position, align)
-    LayoutModel.toggleNotificationsPlacement(
+    var next = LayoutModel.toggleNotificationPlacement(
+      root.layoutNotificationsPlacements, output, position, align)
+    LayoutModel.applyNotificationsPlacements(
       function(mutator) { root.mutateShellConfig(mutator) },
-      root.layoutNotificationsPlacements,
-      output,
-      position,
-      align
+      next
     )
-    refreshLayoutState()
+    root.layoutNotificationsPlacements = next
     if (!wasActive)
       showNotificationsPlacementPreview(output, position, align)
   }
 
   function resetLayoutDefaults() {
-    LayoutModel.resetOmarchyLayout(
+    var layout = LayoutModel.resetOmarchyLayout(
       function(mutator) { root.mutateShellConfig(mutator) },
       Quickshell.screens
     )
-    refreshLayoutState()
+    root.layoutBarPlacements = layout.barPlacements
+    root.layoutNotificationsPlacements = layout.notificationsPlacements
   }
 
   function notificationService() {
-    if (!bar || !bar.shell) return null
-    return bar.shell.serviceFor("evo.monitors")
+    return root.monitorService
   }
 
   function showNotificationsPlacementPreview(output, position, align) {

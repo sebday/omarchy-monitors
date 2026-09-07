@@ -535,7 +535,18 @@ function findBarPlacement(placements, output) {
 
 function readNotificationPlacements(shellConfig, screens) {
   var config = shellConfig || {}
+  var bar = config.bar || {}
   var notifications = config.notifications || {}
+  // Owned by this plugin: scoped mutateShellConfig can persist the bar
+  // subtree, not notifications.*. Prefer that once it exists.
+  if (Array.isArray(bar.notificationPlacements)) {
+    return dedupeNotificationPlacements(normalizeNotificationPlacements(
+      bar.notificationPlacements,
+      null,
+      null,
+      { preserveAlign: true }
+    ))
+  }
   if (Array.isArray(notifications.placements)) {
     return dedupeNotificationPlacements(normalizeNotificationPlacements(
       notifications.placements,

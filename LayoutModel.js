@@ -280,6 +280,9 @@ function readLayoutState(shellConfig) {
   var config = shellConfig || {}
   var bar = config.bar || {}
   var notifications = config.notifications || {}
+  var notificationList = Array.isArray(bar.notificationPlacements)
+    ? bar.notificationPlacements
+    : notifications.placements
   return {
     barPlacements: dedupeBarPlacements(normalizePlacements(
       bar.placements,
@@ -288,7 +291,7 @@ function readLayoutState(shellConfig) {
       { barEdges: true }
     )),
     notificationsPlacements: dedupeNotificationPlacements(normalizePlacements(
-      notifications.placements,
+      notificationList,
       notifications.output,
       notifications.position,
       { preserveAlign: true }
@@ -309,6 +312,10 @@ function applyBarPlacements(mutator, placements) {
 
 function applyNotificationsPlacements(mutator, placements) {
   mutator(function(config) {
+    if (!config.bar || typeof config.bar !== "object") config.bar = {}
+    // Scoped bar plugins can only persist the bar subtree. Keep a copy here
+    // so notification placements survive omarchy-shell's plugin sandbox.
+    config.bar.notificationPlacements = placements
     if (!config.notifications || typeof config.notifications !== "object")
       config.notifications = {}
     config.notifications.placements = placements
