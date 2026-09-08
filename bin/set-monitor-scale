@@ -41,8 +41,9 @@ new_scale="$(clean_scale "$requested" "$width" "$height")"
 hyprctl eval "hl.monitor({ output = \"$name\", mode = \"${width}x${height}@${refresh_rate}\", position = \"${x}x${y}\", scale = $new_scale })" >/dev/null
 
 monitor_lua="$HOME/.config/hypr/monitors.lua"
-if [[ -f $monitor_lua ]]; then
-  sed -i -E \
+if [[ -f $monitor_lua || -L $monitor_lua ]]; then
+  # GNU sed -i otherwise replaces a hyprdots symlink with a forked regular file.
+  sed -i --follow-symlinks -E \
     "s|^(hl\\.monitor\\(\\{ output = \"$name\", mode = \"[^\"]+\", position = \"[^\"]+\", scale = )[^ ]+( \\}\\))|\\1${new_scale}\\2|" \
     "$monitor_lua"
 fi
