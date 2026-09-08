@@ -40,7 +40,7 @@ Panel {
       return Model.availableScales(scalePresets, display.width, display.height)
     return scalePresets
   }
-  property string focusSection: "scale"
+  property string focusSection: "textsize"
   property int selectedIndex: 0
   property bool cursorActive: false
 
@@ -62,7 +62,7 @@ Panel {
     reflowSettle.restart()
   }
 
-  readonly property var visibleSections: ["textsize", "scale"]
+  readonly property var visibleSections: ["textsize"]
 
   function sectionCount(section) {
     if (section === "textsize") return 0
@@ -222,10 +222,7 @@ Panel {
   function selectScaleMonitor(output) {
     if (!output) return
     scaleTargetMonitor = String(output)
-    focusSection = "scale"
     cursorActive = true
-    var idx = activeScaleIndex()
-    selectedIndex = idx >= 0 ? idx : 0
     clampCursor()
   }
 
@@ -392,8 +389,8 @@ Panel {
     if (opened) {
       refresh()
       refreshLayoutState()
-      focusSection = "scale"
-      selectedIndex = 0
+      focusSection = "textsize"
+      selectedIndex = -1
       cursorActive = false
       scaleTargetMonitor = ""
     }
@@ -684,10 +681,12 @@ Panel {
 
           // ---------- Scale ----------
           PanelSeparator {
+            visible: false
             foreground: root.bar.foreground
           }
 
           Column {
+            visible: false
             width: parent.width
             spacing: Style.space(10)
 
