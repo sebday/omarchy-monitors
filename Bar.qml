@@ -303,15 +303,35 @@ Item {
     if (root.shell && typeof root.shell.mutateShellConfig === "function") {
       root.shell.mutateShellConfig(function(config) {
         if (!Util.isPlainObject(config.bar)) config.bar = {}
-        config.bar.position = next
         if (!Array.isArray(config.bar.placements)) config.bar.placements = []
-        // The bar has one edge, so every placement moves with it. No
-        // placements means every screen already has the bar.
         var placements = config.bar.placements
-        for (var i = 0; i < placements.length; i++)
-          placements[i].position = next
-        if (output && placements.length > 0 && !LayoutModel.findPlacement(placements, output))
-          config.bar.placements.push({ output: output, position: next })
+        // No per-output list means every screen shares bar.position.
+        if (!output || placements.length === 0) {
+          config.bar.position = next
+          for (var i = 0; i < placements.length; i++) {
+            if (placements[i]) placements[i].position = next
+          }
+          return
+        }
+
+        var found = false
+        for (var j = 0; j < placements.length; j++) {
+          if (!placements[j] || String(placements[j].output) !== output) continue
+          placements[j].position = next
+          found = true
+        }
+        if (!found)
+          placements.push({ output: output, position: next })
+
+        var agreed = next
+        for (var k = 0; k < placements.length; k++) {
+          if (!placements[k]) continue
+          if (LayoutModel.normalizeBarEdge(placements[k].position) !== agreed) {
+            agreed = ""
+            break
+          }
+        }
+        if (agreed) config.bar.position = agreed
       })
     } else {
       root.position = next
@@ -716,7 +736,8 @@ Item {
       })
     }
 
-    return BarModel.nearestDropTarget(candidates, scenePoint, root.vertical)
+    var dropEdge = root.positionForScreen(sourceWindow ? sourceWindow.screen : null)
+    return BarModel.nearestDropTarget(candidates, scenePoint, dropEdge === "left" || dropEdge === "right")
   }
 
   function visibleModuleSlot(region, name, sourceSlot) {
@@ -1132,18 +1153,23 @@ Item {
       Item {
         anchors.fill: parent
 
-        CenterModules { anchors.fill: parent }
+        CenterModules {
+          anchors.fill: parent
+          barEdge: barWindow.edge
+        }
 
         LeftModules {
           anchors.left: parent.left
           anchors.leftMargin: Style.space(8)
           anchors.verticalCenter: parent.verticalCenter
+          barEdge: barWindow.edge
         }
 
         RightModules {
           anchors.right: parent.right
           anchors.rightMargin: Style.space(8)
           anchors.verticalCenter: parent.verticalCenter
+          barEdge: barWindow.edge
         }
       }
     }
@@ -1154,18 +1180,23 @@ Item {
       Item {
         anchors.fill: parent
 
-        CenterModules { anchors.fill: parent }
+        CenterModules {
+          anchors.fill: parent
+          barEdge: barWindow.edge
+        }
 
         LeftModules {
           anchors.top: parent.top
           anchors.topMargin: Style.space(8)
           anchors.horizontalCenter: parent.horizontalCenter
+          barEdge: barWindow.edge
         }
 
         RightModules {
           anchors.bottom: parent.bottom
           anchors.bottomMargin: Style.space(8)
           anchors.horizontalCenter: parent.horizontalCenter
+          barEdge: barWindow.edge
         }
       }
     }
@@ -1314,12 +1345,14 @@ Item {
     id: centerRoot
 
     property var entries: root.layoutEntries("center")
+    property string barEdge: root.position
+    readonly property bool edgeVertical: barEdge === "left" || barEdge === "right"
     readonly property bool hasAnchor: root.entryIndex(entries, root.centerAnchor) !== -1
     readonly property var anchorEntry: root.findCenterAnchorEntry()
 
     Loader {
       anchors.fill: parent
-      sourceComponent: root.vertical ? verticalCenterModules : horizontalCenterModules
+      sourceComponent: centerRoot.edgeVertical ? verticalCenterModules : horizontalCenterModules
     }
 
     Component {
@@ -1338,6 +1371,7 @@ Item {
           visible: !centerRoot.hasAnchor
           entries: centerRoot.entries
           region: "center"
+          barEdge: centerRoot.barEdge
           anchors.centerIn: parent
         }
 
@@ -1345,6 +1379,7 @@ Item {
           visible: centerRoot.hasAnchor
           entries: root.entriesBefore(centerRoot.entries, root.centerAnchor)
           region: "center"
+          barEdge: centerRoot.barEdge
           anchors.right: centerAnchorModule.left
           anchors.verticalCenter: centerAnchorModule.verticalCenter
         }
@@ -1354,6 +1389,7 @@ Item {
           visible: centerRoot.hasAnchor
           entry: centerRoot.anchorEntry
           region: "center"
+          barEdge: centerRoot.barEdge
           anchors.centerIn: parent
         }
 
@@ -1361,6 +1397,7 @@ Item {
           visible: centerRoot.hasAnchor
           entries: root.entriesAfter(centerRoot.entries, root.centerAnchor)
           region: "center"
+          barEdge: centerRoot.barEdge
           anchors.left: centerAnchorModule.right
           anchors.verticalCenter: centerAnchorModule.verticalCenter
         }
@@ -1383,6 +1420,7 @@ Item {
           visible: !centerRoot.hasAnchor
           entries: centerRoot.entries
           region: "center"
+          barEdge: centerRoot.barEdge
           anchors.centerIn: parent
         }
 
@@ -1390,6 +1428,7 @@ Item {
           visible: centerRoot.hasAnchor
           entries: root.entriesBefore(centerRoot.entries, root.centerAnchor)
           region: "center"
+          barEdge: centerRoot.barEdge
           anchors.bottom: centerAnchorModule.top
           anchors.horizontalCenter: centerAnchorModule.horizontalCenter
         }
@@ -1399,6 +1438,7 @@ Item {
           visible: centerRoot.hasAnchor
           entry: centerRoot.anchorEntry
           region: "center"
+          barEdge: centerRoot.barEdge
           anchors.centerIn: parent
         }
 
@@ -1406,6 +1446,7 @@ Item {
           visible: centerRoot.hasAnchor
           entries: root.entriesAfter(centerRoot.entries, root.centerAnchor)
           region: "center"
+          barEdge: centerRoot.barEdge
           anchors.top: centerAnchorModule.bottom
           anchors.horizontalCenter: centerAnchorModule.horizontalCenter
         }
@@ -1500,6 +1541,8 @@ Item {
 
     property var entries: []
     property string region: ""
+    property string barEdge: root.position
+    readonly property bool edgeVertical: barEdge === "left" || barEdge === "right"
 
     visible: entries.length > 0
     // A hidden list must not build its modules. The center section declares
@@ -1508,7 +1551,7 @@ Item {
     // twice — two IPC handlers registered for the same target, two clocks
     // ticking, two of every timer and fetch behind them.
     active: visible && entries.length > 0
-    sourceComponent: root.vertical ? verticalModuleList : horizontalModuleList
+    sourceComponent: edgeVertical ? verticalModuleList : horizontalModuleList
     width: item ? item.implicitWidth : 0
     height: item ? item.implicitHeight : 0
 
@@ -1525,6 +1568,7 @@ Item {
             required property var modelData
             entry: modelData
             region: moduleListRoot.region
+            barEdge: moduleListRoot.barEdge
           }
         }
       }
@@ -1543,6 +1587,7 @@ Item {
             required property var modelData
             entry: modelData
             region: moduleListRoot.region
+            barEdge: moduleListRoot.barEdge
           }
         }
       }
@@ -1554,6 +1599,9 @@ Item {
 
     required property var entry
     property string region: ""
+    property string barEdge: root.position
+    readonly property bool edgeVertical: barEdge === "left" || barEdge === "right"
+    readonly property int edgeBarSize: edgeVertical ? Style.bar.sizeVertical : Style.bar.sizeHorizontal
     readonly property string moduleName: root.entryId(entry)
     readonly property var moduleSettings: root.entrySettings(entry)
     readonly property string customType: root.customModuleType(entry)
@@ -1582,12 +1630,12 @@ Item {
     // dot should be along the bar, so it tracks what the module paints
     // instead of a fraction of whatever slot it happens to fill.
     readonly property real panelIndicatorExtent: {
-      var key = root.vertical ? "openPanelIndicatorHeight" : "openPanelIndicatorWidth"
+      var key = edgeVertical ? "openPanelIndicatorHeight" : "openPanelIndicatorWidth"
       var hint = activeItem && key in activeItem ? activeItem[key] : undefined
       if (hint !== undefined && hint !== null && hint > 0) return Math.round(hint)
-      return Math.max(Style.space(10), Math.round((root.vertical ? slot.height : slot.width) * 0.55))
+      return Math.max(Style.space(10), Math.round((edgeVertical ? slot.height : slot.width) * 0.55))
     }
-    implicitWidth: activeItem && activeItem.visible ? (root.vertical ? root.barSize : activeItem.implicitWidth) : 0
+    implicitWidth: activeItem && activeItem.visible ? (edgeVertical ? edgeBarSize : activeItem.implicitWidth) : 0
     implicitHeight: activeItem && activeItem.visible ? activeItem.implicitHeight : 0
     width: implicitWidth
     height: implicitHeight
@@ -1656,18 +1704,18 @@ Item {
       opacity: slot.panelOpen && !slot.dragSource ? 0.9 : 0
       color: Color.accent
       radius: Math.min(width, height) / 2
-      width: root.vertical ? Style.space(2) : slot.panelIndicatorExtent
-      height: root.vertical ? slot.panelIndicatorExtent : Style.space(2)
+      width: slot.edgeVertical ? Style.space(2) : slot.panelIndicatorExtent
+      height: slot.edgeVertical ? slot.panelIndicatorExtent : Style.space(2)
       // The mark sits on the module's inner edge — the one facing the
       // desktop — so it underlines a top bar, overlines a bottom one, and
       // points inward from a left or right one. It reads as pointing at the
       // panel that opens on that side.
-      x: root.vertical
-        ? (root.position === "left" ? parent.width - width - inset : inset)
+      x: slot.edgeVertical
+        ? (slot.barEdge === "left" ? parent.width - width - inset : inset)
         : Math.round((parent.width - width) / 2)
-      y: root.vertical
+      y: slot.edgeVertical
         ? Math.round((parent.height - height) / 2)
-        : (root.position === "top" ? parent.height - height - inset : inset)
+        : (slot.barEdge === "top" ? parent.height - height - inset : inset)
       z: 50
 
       Behavior on opacity {

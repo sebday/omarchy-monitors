@@ -121,8 +121,8 @@ function hasNotificationAlign(placements, output, edge, align) {
     && normalizeAlign(entry.align) === normalizeAlign(align)
 }
 
-// The bar is one object shared by every widget, so it has one edge. Choosing
-// an edge on any output moves every bar placement to it.
+// Each output keeps its own edge. Clicking one monitor must not slide the
+// others onto that same edge.
 function toggleBarPlacementForOutput(placements, output, edge) {
   var name = String(output || "")
   var next = normalizeBarEdge(edge)
@@ -134,7 +134,7 @@ function toggleBarPlacementForOutput(placements, output, edge) {
   for (var i = 0; i < list.length; i++) {
     var p = list[i]
     if (!p || String(p.output) === name) continue
-    out.push({ output: String(p.output), position: next })
+    out.push({ output: String(p.output), position: normalizeBarEdge(p.position) })
   }
 
   if (current && normalizeBarEdge(current.position) === next)
@@ -172,14 +172,26 @@ function toggleNotificationPlacement(placements, output, edge, align) {
   return out
 }
 
+// bar.position is the shared fallback widgets read. It only moves when every
+// placed bar sits on that edge; a mixed layout leaves the fallback alone.
+function sharedBarEdge(placements) {
+  if (!placements || placements.length === 0) return ""
+  var edge = normalizeBarEdge(placements[0] && placements[0].position)
+  for (var i = 1; i < placements.length; i++) {
+    if (!placements[i] || normalizeBarEdge(placements[i].position) !== edge)
+      return ""
+  }
+  return edge
+}
+
 function applyBarPlacements(mutator, placements) {
   mutator(function(config) {
     if (!config.bar || typeof config.bar !== "object") config.bar = {}
     config.bar.placements = dedupeByOutput(placements)
     delete config.bar.output
     if (!config.bar.id) config.bar.id = "evo.monitors"
-    if (config.bar.placements.length > 0)
-      config.bar.position = config.bar.placements[0].position
+    var shared = sharedBarEdge(config.bar.placements)
+    if (shared) config.bar.position = shared
   })
 }
 
