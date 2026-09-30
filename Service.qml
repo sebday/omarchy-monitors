@@ -9,6 +9,7 @@ import Quickshell.Services.Notifications
 import qs.Commons
 
 import "components"
+import "LayoutModel.js" as LayoutModel
 import "NotificationLogic.js" as NotificationLogic
 
 Item {
@@ -23,7 +24,6 @@ Item {
   // (the notifications received, the last-set DND preference), not
   // regeneratable cache that a `rm -rf ~/.cache` should wipe.
   readonly property string stateDir: home + "/.local/state/omarchy/"
-  readonly property string settingsHelper: Qt.resolvedUrl("bin/notif-settings").toString().replace("file://", "")
   readonly property string filesHelper: Qt.resolvedUrl("bin/notif-files").toString().replace("file://", "")
   readonly property var filesHelperCmd: ["/usr/bin/python3", "-I", filesHelper]
   // One file per on-screen popup, so live toasts survive shell restarts.
@@ -65,35 +65,28 @@ Item {
     onFileChanged: reload()
   }
 
+  // A half-written or hand-broken shell.json keeps the last good layout rather
+  // than dropping to "popups on every screen".
   function loadUserShellConfig(raw) {
     var parsed = {}
     try {
-      var text = String(raw || "").trim()
-      var value = JSON.parse(text || "{}")
+      var value = JSON.parse(String(raw || "").trim() || "{}")
       if (value && typeof value === "object") parsed = value
     } catch (e) {
-      parsed = {}
+      if (userShellConfigLoaded) return
     }
     userShellConfig = parsed
     userShellConfigLoaded = true
   }
 
-  readonly property var layoutConfig: {
-    var fileConfig = userShellConfigLoaded ? userShellConfig : null
-    if (fileConfig && typeof fileConfig === "object")
-      return fileConfig
-    var barConfig = shell && shell.barConfig ? shell.barConfig : null
-    return barConfig ? { bar: barConfig } : {}
-  }
-  readonly property var notificationPlacements: userShellConfigLoaded
-    ? NotificationLogic.readNotificationPlacements(layoutConfig, Quickshell.screens)
+  // Configured placements only. An empty list means every screen, each with
+  // the default top-right column.
+  readonly property var notificationPlacements: LayoutModel.readNotificationPlacements(userShellConfig)
+  readonly property var popupScreens: userShellConfigLoaded
+    ? LayoutModel.screensForPlacements(notificationPlacements, Quickshell.screens)
     : []
-  readonly property var barPlacements: NotificationLogic.readBarPlacements(layoutConfig)
-
-  function barClearanceForScreen(screenName) {
-    var barPlacement = NotificationLogic.findBarPlacement(barPlacements, screenName)
-    return liveBarSize + Style.gapsOut
-  }
+  readonly property var barScreenNames: LayoutModel.screenNames(
+    LayoutModel.screensForPlacements(LayoutModel.readBarPlacements(userShellConfig.bar), Quickshell.screens))
 
   // Live Notification objects by originalId, kept OUT of the ListModels: a
   // QObject stored in a model role becomes a dangling C++ pointer when the
@@ -206,9 +199,13 @@ Item {
     liveRefs[snapshot.originalId] = notification
     // Guard the delete: a newer notification may have reused this originalId
     // (freedesktop replaces_id) and taken over the map slot.
-    notification.closed.connect(function() {
+    notification.closed.connect(function(reason) {
       if (service.liveRefs[snapshot.originalId] === notification)
         delete service.liveRefs[snapshot.originalId]
+      // The sender withdrew it (CloseNotification). Nothing else would take a
+      // critical toast down.
+      if (reason === NotificationCloseReason.CloseRequested)
+        Qt.callLater(function() { service.removeClosedPopup(snapshot.originalId, snapshot.timestamp) })
     })
 
     // DND bypass rules: chat apps abuse urgency=critical to force
@@ -233,6 +230,7 @@ Item {
     // Repeater is mid-incubation while we mutate its model.
     Qt.callLater(function() {
       removePopupsByOriginalId(snapshot.originalId, NotificationLogic.popupFileName(snapshot))
+      removeDuplicatePopups(service.currentContent(notification, snapshot))
       popupModel.insert(0, snapshot)
       // An update that arrived while the insert was deferred found no row to
       // write to, and a property that already changed will not change again.
@@ -354,6 +352,48 @@ Item {
     }
   }
 
+  // What the notification says now: a replaces_id update may have landed
+  // while its insert was deferred, and the snapshot still holds the original.
+  function currentContent(notification, snapshot) {
+    try {
+      return NotificationLogic.replacementSnapshot(notification, snapshot.originalId, snapshot.timestamp)
+    } catch (e) {
+      // Torn down by the server meanwhile — the snapshot is all there is.
+      return snapshot
+    }
+  }
+
+  // A notification repeating a toast already on screen takes its place, the
+  // same way a replaces_id update would. Only toasts with a live notification
+  // behind them qualify: a restored or replayed row shares its images with an
+  // entry already in history.
+  function removeDuplicatePopups(snapshot) {
+    for (var i = popupModel.count - 1; i >= 0; i--) {
+      var row = popupModel.get(i)
+      if (!NotificationLogic.isDuplicatePopup(row, snapshot) || isRestoredRow(row)) continue
+      var ref = liveRefs[row.originalId]
+      if (!ref) continue
+      deletePopupFileFor(row)
+      popupModel.remove(i)
+      try {
+        if (ref.tracked) ref.dismiss()
+      } catch (e) {
+        // Object already torn down by the server — nothing to dismiss.
+      }
+    }
+  }
+
+  // The server object is already closed, and its id may belong to a newer
+  // notification by now, so this never goes through liveRefs.
+  function removeClosedPopup(originalId, timestamp) {
+    for (var i = popupModel.count - 1; i >= 0; i--) {
+      var row = popupModel.get(i)
+      if (!row || row.originalId !== originalId || row.timestamp !== timestamp || isRestoredRow(row)) continue
+      archivePopupFileFor(row)
+      popupModel.remove(i)
+    }
+  }
+
   function dismissPopup(index) {
     removePopup(index, "dismiss")
   }
@@ -397,15 +437,16 @@ Item {
   }
 
   // Ephemeral toast when the monitors panel enables a notification placement.
-  function showPlacementPreview(output, edge, align, headline, detail) {
+  function showPlacementPreview(headline, detail) {
     var snapshot = NotificationLogic.snapshotOf({
       id: Date.now(),
       appName: "omarchy-action",
       summary: String(headline || "Notifications here"),
       body: String(detail || ""),
+      urgency: NotificationUrgency.Low,
+      expireTimeout: lowPopupDuration,
       hints: { transient: true, "omarchy-glyph": "󰂚" }
     }, Date.now())
-    snapshot.expireTimeout = 3000
     Qt.callLater(function() {
       popupModel.insert(0, snapshot)
     })
@@ -467,12 +508,6 @@ Item {
   }
 
   Process { id: focusAppProc; running: false }
-
-  Process {
-    id: ensureDirsProc
-    command: ["mkdir", "-p", service.stateDir, service.popupStateDir, service.historyDir, service.imagesDir]
-    running: false
-  }
 
   // ---------------------------------------------------- popup persistence
   //
@@ -619,10 +654,9 @@ Item {
 
   Process {
     id: readHistoryProc
-    onStarted: { stdoutBuf = ""; stderrBuf = "" }
+    onStarted: stdoutBuf = ""
 
     property string stdoutBuf: ""
-    property string stderrBuf: ""
     running: false
     command: ["/usr/bin/python3", "-I", service.filesHelper, "read-history"]
     // Let the file queue go again, whatever the read did — a failed or empty
@@ -732,10 +766,9 @@ Item {
 
   Process {
     id: restorePopupsProc
-    onStarted: { stdoutBuf = ""; stderrBuf = "" }
+    onStarted: stdoutBuf = ""
 
     property string stdoutBuf: ""
-    property string stderrBuf: ""
     running: false
     command: ["/usr/bin/python3", "-I", service.filesHelper, "read-popups"]
     onExited: service.restorePopups(stdoutBuf)
@@ -813,10 +846,9 @@ Item {
 
   Process {
     id: settingsReadProc
-    onStarted: { stdoutBuf = ""; stderrBuf = "" }
+    onStarted: stdoutBuf = ""
     property string stdoutBuf: ""
-    property string stderrBuf: ""
-    command: ["/usr/bin/python3", "-I", service.settingsHelper, "read"]
+    command: service.filesHelperCmd.concat(["settings-read"])
     stdout: SplitParser {
       splitMarker: ""
       onRead: function(chunk) {
@@ -834,12 +866,13 @@ Item {
     id: settingsWriteProc
     stdinEnabled: true
     property string payload: ""
-    command: ["/usr/bin/python3", "-I", service.settingsHelper, "write"]
+    command: service.filesHelperCmd.concat(["settings-write"])
     onStarted: {
       write(payload)
       payload = ""
       stdinEnabled = false
     }
+    onExited: if (service.settingsDirty) service.flushSettings()
   }
 
   Timer {
@@ -877,29 +910,34 @@ Item {
     if (parsed.legacy) service.scheduleSettingsSave()
   }
 
+  // A toggle while the previous write is still running is saved once that
+  // write exits, so the file always ends on the latest value.
+  property bool settingsDirty: false
+
   function flushSettings() {
+    if (settingsWriteProc.running) {
+      settingsDirty = true
+      return
+    }
+    settingsDirty = false
     settingsWriteProc.payload = JSON.stringify({ version: 3, dnd: persisted.doNotDisturb }, null, 2) + "\n"
     settingsWriteProc.stdinEnabled = true
     settingsWriteProc.running = true
   }
 
+  // The helper creates the state directories itself. An empty settings read
+  // (no file yet) leaves the defaults in place.
   Component.onCompleted: {
-    ensureDirsProc.running = true
-    // Once mkdir has had a tick, load the existing settings file. FileView
-    // surfaces an empty string when the file doesn't exist; loadSettings
-    // handles that path.
-    Qt.callLater(function() {
-      settingsReadProc.running = true
-      restorePopupsProc.running = true
-      // Safe beside the restore read: it only re-persists entries whose
-      // JSON exists, exactly the images the sweep keeps.
-      service.sweepOrphanImages()
-    })
+    settingsReadProc.running = true
+    restorePopupsProc.running = true
+    // Safe beside the restore read: it only re-persists entries whose
+    // JSON exists, exactly the images the sweep keeps.
+    sweepOrphanImages()
   }
 
   // ---------------------------------------------------- IPC
 
-  IpcHandler {
+  ShellIpc {
     target: "notifications"
 
     function dndState(): string {
@@ -989,11 +1027,24 @@ Item {
 
   // -------------------------------------------------------------- popup UI
   //
-  // One PanelWindow per output that has a notifications.placements entry in
-  // shell.json. Layer is Overlay, exclusionMode Ignore, no keyboard focus.
+  // One PanelWindow per placed output that is connected, or the first screen
+  // when none are (see LayoutModel.screensForPlacements). Layer is Overlay,
+  // exclusionMode Ignore, no keyboard focus.
+
+  // Every window shows every row, so a hover on any screen holds that row on
+  // all of them. Counted by row key because two screens can hover at once.
+  property var hoveredRows: ({})
+
+  function setRowHovered(key, hovered) {
+    var next = Object.assign({}, hoveredRows)
+    var count = (next[key] || 0) + (hovered ? 1 : -1)
+    if (count > 0) next[key] = count
+    else delete next[key]
+    hoveredRows = next
+  }
 
   Variants {
-    model: Quickshell.screens
+    model: service.popupScreens
 
     PanelWindow {
       id: popupWindow
@@ -1001,23 +1052,19 @@ Item {
       screen: modelData
 
       readonly property string screenName: modelData ? String(modelData.name || "") : ""
-      readonly property var screenNotificationPlacement: NotificationLogic.findNotificationPlacement(
-        service.notificationPlacements, screenName)
-      readonly property var screenBarPlacement: NotificationLogic.findBarPlacement(
-        service.barPlacements, screenName)
-      readonly property var placementConfig: NotificationLogic.popupPlacementForScreen(
-        screenNotificationPlacement,
-        screenBarPlacement,
-        service.barClearanceForScreen(screenName),
+      readonly property bool screenHasBar: service.barScreenNames.indexOf(screenName) >= 0
+      readonly property var placementConfig: LayoutModel.popupPlacementForScreen(
+        LayoutModel.findPlacement(service.notificationPlacements, screenName),
+        screenHasBar ? service.barPosition : "",
+        service.barClearance,
         Style.gapsOut)
       readonly property int columnAlignment: {
-        if (!placementConfig) return Qt.AlignRight
         if (placementConfig.align === "left") return Qt.AlignLeft
         if (placementConfig.align === "center") return Qt.AlignHCenter
         return Qt.AlignRight
       }
 
-      visible: popupModel.count > 0 && screenNotificationPlacement !== null
+      visible: popupModel.count > 0
 
       WlrLayershell.namespace: "omarchy-notifications"
       WlrLayershell.layer: WlrLayer.Overlay
@@ -1033,16 +1080,15 @@ Item {
         id: popupColumn
         spacing: Style.space(8)
 
-        anchors.top: placementConfig && placementConfig.vertical === "top" ? parent.top : undefined
-        anchors.bottom: placementConfig && placementConfig.vertical === "bottom" ? parent.bottom : undefined
-        anchors.left: placementConfig && placementConfig.align === "left" ? parent.left : undefined
-        anchors.right: placementConfig && placementConfig.align === "right" ? parent.right : undefined
-        anchors.horizontalCenter: placementConfig && placementConfig.align === "center"
-          ? parent.horizontalCenter : undefined
-        anchors.topMargin: placementConfig ? placementConfig.margins.top : Style.gapsOut
-        anchors.bottomMargin: placementConfig ? placementConfig.margins.bottom : Style.gapsOut
-        anchors.leftMargin: placementConfig ? placementConfig.margins.left : Style.gapsOut
-        anchors.rightMargin: placementConfig ? placementConfig.margins.right : Style.gapsOut
+        anchors.top: placementConfig.vertical === "top" ? parent.top : undefined
+        anchors.bottom: placementConfig.vertical === "bottom" ? parent.bottom : undefined
+        anchors.left: placementConfig.align === "left" ? parent.left : undefined
+        anchors.right: placementConfig.align === "right" ? parent.right : undefined
+        anchors.horizontalCenter: placementConfig.align === "center" ? parent.horizontalCenter : undefined
+        anchors.topMargin: placementConfig.margins.top
+        anchors.bottomMargin: placementConfig.margins.bottom
+        anchors.leftMargin: placementConfig.margins.left
+        anchors.rightMargin: placementConfig.margins.right
 
         Repeater {
           model: popupModel
@@ -1059,15 +1105,19 @@ Item {
             required property int urgency
             required property double expireTimeout
             required property double timestamp
+            required property double originalId
 
             Layout.preferredWidth: card.implicitWidth
             Layout.alignment: popupWindow.columnAlignment
             implicitHeight: card.implicitHeight
 
+            readonly property string rowKey: NotificationLogic.imageStem({ timestamp: cardSlot.timestamp, originalId: cardSlot.originalId })
             readonly property real lifetime: service.durationFor(cardSlot.urgency, cardSlot.expireTimeout)
             property real remainingLifetime: 1.0
-            readonly property bool ticking: cardSlot.lifetime > 0 && !card.hovered
+            readonly property bool ticking: cardSlot.lifetime > 0 && !service.hoveredRows[cardSlot.rowKey]
+            property bool hoverCounted: false
 
+            Component.onDestruction: if (hoverCounted) service.setRowHovered(rowKey, false)
             onSummaryChanged: cardSlot.remainingLifetime = 1.0
             onBodyChanged: cardSlot.remainingLifetime = 1.0
             onImageChanged: cardSlot.remainingLifetime = 1.0
@@ -1102,6 +1152,11 @@ Item {
               fontFamily: service.shell && service.shell.bar ? service.shell.bar.fontFamily : ""
               glyph: cardSlot.glyph
 
+              onHoveredChanged: {
+                if (hovered === cardSlot.hoverCounted) return
+                cardSlot.hoverCounted = hovered
+                service.setRowHovered(cardSlot.rowKey, hovered)
+              }
               onCloseRequested: service.dismissPopup(cardSlot.index)
               onCardClicked: service.invokePopupDefault(cardSlot.index)
             }

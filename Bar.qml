@@ -7,14 +7,11 @@ import QtQuick.Layouts
 import qs.Commons
 import qs.Ui
 import "BarModel.js" as BarModel
-import "BarPlacementModel.js" as BarPlacementModel
-import "Model.js" as Model
+import "LayoutModel.js" as LayoutModel
 
 Item {
   id: root
 
-  // Injected by the host shell (set in configureBar after Loader creates this item).
-  property string omarchyPath: ""
   // Injected by the host shell so bar slots can resolve enabled widgets.
   property var barWidgetRegistry: null
   // Injected by the host shell every time shell.json is reloaded. Holds the
@@ -73,9 +70,9 @@ Item {
   property color background: Color.bar.background
   property color urgent: Color.bar.active
 
-  Behavior on barForeground { enabled: root.foregroundAnimationEnabled; ColorAnimation { duration: 420; easing.type: Easing.InOutCubic } }
-  Behavior on background { ColorAnimation { duration: 420; easing.type: Easing.InOutCubic } }
-  Behavior on urgent { ColorAnimation { duration: 420; easing.type: Easing.InOutCubic } }
+  Behavior on barForeground { enabled: root.foregroundAnimationEnabled; ColorAnimation { duration: Style.duration(420); easing.type: Easing.InOutCubic } }
+  Behavior on background { ColorAnimation { duration: Style.duration(420); easing.type: Easing.InOutCubic } }
+  Behavior on urgent { ColorAnimation { duration: Style.duration(420); easing.type: Easing.InOutCubic } }
   property var tooltipTarget: null
   property var pendingTooltipTarget: null
   property string tooltipText: ""
@@ -90,8 +87,6 @@ Item {
   property var barDragWindow: null
   property var barDragScreen: null
   property url barDragImageUrl: ""
-  property real barDragSceneX: 0
-  property real barDragSceneY: 0
   property real barDragScreenX: 0
   property real barDragScreenY: 0
   property real barDragOffsetX: 0
@@ -103,16 +98,16 @@ Item {
   property var clickTargets: []
   property var moduleSlots: []
 
-  readonly property var barPlacements: BarPlacementModel.readBarPlacements(
-    Util.isPlainObject(barConfig) ? barConfig : fallbackBarConfig
-  )
-  readonly property var mountedScreens: BarPlacementModel.screensForBar(
-    barPlacements,
-    Quickshell.screens
-  )
+  readonly property var barPlacements: LayoutModel.readBarPlacements(barConfig)
+  // Nothing mounts until the host hands over the config, so a placed bar
+  // never flashes onto every screen at startup.
+  readonly property var mountedScreens: Util.isPlainObject(barConfig)
+    ? LayoutModel.screensForPlacements(barPlacements, Quickshell.screens)
+    : []
 
   function positionForScreen(screen) {
-    return BarPlacementModel.positionForScreen(barPlacements, screen, position)
+    var placement = LayoutModel.findPlacement(barPlacements, screen ? screen.name : "")
+    return LayoutModel.normalizeBarEdge(placement ? placement.position : position)
   }
 
   function registerClickTarget(target) {
@@ -205,8 +200,6 @@ Item {
     barDragTarget = null
     barDragTargetGeometry = null
     barDragAfter = false
-    barDragSceneX = 0
-    barDragSceneY = 0
     barDragScreenX = 0
     barDragScreenY = 0
     barDragOffsetX = 0
@@ -218,9 +211,10 @@ Item {
     var y = scenePoint ? scenePoint.y : 0
     if (!window || !window.screen) return { x: x, y: y }
 
-    if (root.position === "bottom")
+    var edge = positionForScreen(window.screen)
+    if (edge === "bottom")
       y += Math.max(0, window.screen.height - window.height)
-    else if (root.position === "right")
+    else if (edge === "right")
       x += Math.max(0, window.screen.width - window.width)
 
     return { x: x, y: y }
@@ -310,14 +304,14 @@ Item {
       root.shell.mutateShellConfig(function(config) {
         if (!Util.isPlainObject(config.bar)) config.bar = {}
         config.bar.position = next
-        if (!output) return
         if (!Array.isArray(config.bar.placements)) config.bar.placements = []
-        for (var i = 0; i < config.bar.placements.length; i++) {
-          if (String(config.bar.placements[i].output || "") !== output) continue
-          config.bar.placements[i].position = next
-          return
-        }
-        config.bar.placements.push({ output: output, position: next })
+        // The bar has one edge, so every placement moves with it. No
+        // placements means every screen already has the bar.
+        var placements = config.bar.placements
+        for (var i = 0; i < placements.length; i++)
+          placements[i].position = next
+        if (output && placements.length > 0 && !LayoutModel.findPlacement(placements, output))
+          config.bar.placements.push({ output: output, position: next })
       })
     } else {
       root.position = next
@@ -566,10 +560,6 @@ Item {
     return BarModel.entryId(entry)
   }
 
-  function moduleString(entry, key, fallback) {
-    return BarModel.moduleString(entry, key, fallback)
-  }
-
   function entryIndex(entries, name) {
     return BarModel.entryIndex(entries, name)
   }
@@ -584,14 +574,6 @@ Item {
 
   function canonicalWidgetId(name) {
     return Util.canonicalWidgetId(name)
-  }
-
-  function expandPath(path) {
-    return BarModel.expandPath(path, home)
-  }
-
-  function customModuleSafeName(name) {
-    return BarModel.customModuleSafeName(name)
   }
 
   function customModuleType(entry) {
@@ -928,7 +910,7 @@ Item {
         return
       }
       tooltipTarget = pendingTooltipTarget
-      tooltipText = Model.plain(pendingTooltipText, 240)
+      tooltipText = pendingTooltipText
       pendingTooltipTarget = null
       pendingTooltipText = ""
       tooltipTimer.restart()
@@ -974,6 +956,16 @@ Item {
     blockAllReads: true
     printErrors: false
     onFileChanged: barHiddenProbe.running = true
+  }
+
+  // The directory watch can stop delivering events after quick flag changes.
+  // `omarchy-toggle-bar` nudges this after flipping the flag.
+  ShellIpc {
+    target: "omarchy.bar"
+
+    function syncHidden(): void {
+      barHiddenProbe.running = true
+    }
   }
 
   Variants {
@@ -1296,7 +1288,7 @@ Item {
         opacity: root.barMoveCandidate === modelData ? (root.transparent ? 0.45 : 0.7) : 0
 
         Behavior on opacity {
-          NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
+          NumberAnimation { duration: Style.duration(140); easing.type: Easing.OutCubic }
         }
       }
     }
@@ -1679,7 +1671,7 @@ Item {
       z: 50
 
       Behavior on opacity {
-        NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
+        NumberAnimation { duration: Style.duration(120); easing.type: Easing.OutCubic }
       }
     }
 
@@ -1730,8 +1722,6 @@ Item {
         if (dragging) {
           var scenePoint = slot.mapToItem(null, mouse.x, mouse.y)
           var screenPoint = root.barDragScreenPoint(scenePoint)
-          root.barDragSceneX = scenePoint.x
-          root.barDragSceneY = scenePoint.y
           root.barDragScreenX = screenPoint.x
           root.barDragScreenY = screenPoint.y
 
@@ -1841,21 +1831,20 @@ Item {
 
     Process {
       id: customProc
-    onStarted: { stdoutBuf = ""; stderrBuf = "" }
-
-    property string stdoutBuf: ""
-    property string stderrBuf: ""
+      property string stdoutBuf: ""
       command: ["bash", "-lc", String(customRoot.setting("exec", ""))]
+      onStarted: stdoutBuf = ""
+      onExited: customRoot.update(stdoutBuf)
       stdout: SplitParser {
-      splitMarker: ""
-      onRead: function(chunk) {
-        customProc.stdoutBuf += chunk
-        if (customProc.stdoutBuf.length > 262144) {
-          customProc.signal(15)
-          customProc.stdoutBuf = ""
+        splitMarker: ""
+        onRead: function(chunk) {
+          customProc.stdoutBuf += chunk
+          if (customProc.stdoutBuf.length > 262144) {
+            customProc.signal(15)
+            customProc.stdoutBuf = ""
+          }
         }
       }
-    }
     }
 
     Timer {

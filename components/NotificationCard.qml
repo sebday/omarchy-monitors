@@ -41,19 +41,14 @@ BorderSurface {
   readonly property bool compactGlyph: NotificationLogic.shouldRenderCompactGlyph(glyph, smallIconSource, singleLineToast)
   readonly property bool hasSmallIcon: smallIconSource.length > 0
   readonly property bool summaryStartsWithGlyph: NotificationLogic.summaryStartsWithGlyph(summary)
-  readonly property bool singleLineToast: sanitizedBody.length === 0
+  readonly property bool singleLineToast: plainBody.trim().length === 0
   readonly property bool collapseRedundantIcon: singleLineToast && !hasGlyph && summaryStartsWithGlyph
-  readonly property string sanitizedBody: sanitizeBody(body)
-  readonly property string styledBody: NotificationLogic.styledBody(body, app, appIcon)
+  readonly property string plainBody: NotificationLogic.plainBody(body, app, appIcon)
 
   readonly property color dimColor: Qt.darker(Color.notifications.text, 1.4)
   readonly property color bodyColor: Qt.darker(Color.notifications.text, 1.15)
   readonly property color accentColor: urgency === 2 ? Color.urgent : (urgency === 0 ? dimColor : Color.notifications.countdown)
   readonly property var cardBorderSpec: Border.surfaceSpec("notifications", "border", Color.notifications.border, Math.max(1, Style.space(2)))
-
-  function sanitizeBody(s) {
-    return NotificationLogic.sanitizeBody(s, app, appIcon)
-  }
 
   function iconSource(icon) {
     var value = String(icon || "")
@@ -161,10 +156,6 @@ BorderSurface {
         spacing: Style.space(2)
 
         Text {
-          // The spec defines the summary as a single line of plain text, so
-          // AutoText could only ever promote a hostile string to rich text.
-          // The body below is StyledText on purpose — see Service.qml's
-          // bodyMarkupSupported — and is stripped in NotificationLogic.
           textFormat: Text.PlainText
           Layout.fillWidth: true
           visible: root.summary.length > 0
@@ -181,8 +172,8 @@ BorderSurface {
         Text {
           Layout.fillWidth: true
           Layout.topMargin: Style.space(2)
-          visible: root.sanitizedBody.length > 0
-          text: root.styledBody
+          visible: !root.singleLineToast
+          text: root.plainBody
           textFormat: Text.PlainText
           font.family: root.fontFamily || Style.font.family
           color: root.bodyColor
@@ -207,7 +198,7 @@ BorderSurface {
     visible: opacity > 0
     opacity: root.hovered ? 1 : 0
 
-    Behavior on opacity { NumberAnimation { duration: 100 } }
+    Behavior on opacity { NumberAnimation { duration: Style.duration(100) } }
 
     Text {
       textFormat: Text.PlainText

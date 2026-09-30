@@ -1,5 +1,6 @@
 #!/usr/bin/python3 -I
-"""Popup and history files under ~/.local/state/omarchy/notifications/.
+"""Popup and history files under ~/.local/state/omarchy/notifications/, and
+the DND setting beside them in ~/.local/state/omarchy/notifications.json.
 
 QML never builds a shell string. JSON arrives on stdin. Image copy sources
 are opened once with O_NOFOLLOW|O_NONBLOCK and the dest is published by
@@ -20,6 +21,7 @@ STEM_RE = re.compile(r"^[0-9]{1,16}-[0-9]{1,16}$")
 JSON_RE = re.compile(r"^[0-9]{1,16}-[0-9]{1,16}\.json$")
 IMAGE_RE = re.compile(r"^([0-9]{1,16}-[0-9]{1,16})-(appIcon|image)$")
 CHAIN = [".local", "state", "omarchy", "notifications"]
+SETTINGS_NAME = "notifications.json"
 
 
 def open_dir_chain(parts):
@@ -208,27 +210,34 @@ def json_names(dirfd):
     return names
 
 
+def read_owned(dirfd, name):
+    """The file's bytes, or None unless it is a plain file we own within MAX_JSON."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dirfd)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_nlink != 1:
+            return None
+        os.set_blocking(fd, True)
+        data = b""
+        while len(data) <= MAX_JSON:
+            chunk = os.read(fd, min(65536, MAX_JSON + 1 - len(data)))
+            if not chunk:
+                break
+            data += chunk
+        return data if len(data) <= MAX_JSON else None
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
 def cat_json(dirfd):
     out = bytearray()
     for name in json_names(dirfd):
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dirfd)
-        try:
-            st = os.fstat(fd)
-            if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_nlink != 1:
-                continue
-            os.set_blocking(fd, True)
-            data = b""
-            while len(data) <= MAX_JSON:
-                chunk = os.read(fd, min(65536, MAX_JSON + 1 - len(data)))
-                if not chunk:
-                    break
-                data += chunk
-            if len(data) > MAX_JSON:
-                continue
-        except OSError:
-            continue
-        finally:
-            os.close(fd)
+        data = read_owned(dirfd, name)
         if not data:
             continue
         if not data.endswith(b"\n"):
@@ -309,10 +318,28 @@ def cmd_sweep(popup_fd, history_fd, images_fd):
             unlink_if_present(images_fd, name)
 
 
+def cmd_settings(state_fd, op):
+    if op == "settings-read":
+        sys.stdout.buffer.write(read_owned(state_fd, SETTINGS_NAME) or b"")
+        return
+    payload = sys.stdin.buffer.read(MAX_JSON + 1)
+    if len(payload) > MAX_JSON:
+        raise ValueError("payload too large")
+    json.loads(payload.decode("utf-8"))
+    write_atomic(state_fd, SETTINGS_NAME, payload)
+
+
 def main(argv):
     if len(argv) < 2:
         sys.exit(2)
     op = argv[1]
+    if op in ("settings-read", "settings-write"):
+        state_fd = open_dir_chain(CHAIN[:-1])
+        try:
+            cmd_settings(state_fd, op)
+        finally:
+            os.close(state_fd)
+        return
     popup_fd = open_dir_chain(CHAIN)
     history_fd = None
     images_fd = None

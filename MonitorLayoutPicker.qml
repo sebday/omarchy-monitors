@@ -16,13 +16,11 @@ Item {
   property string selectedMonitor: ""
   property bool enabled: true
   property bool showWorkspaces: true
-  property bool workspaceClickable: false
   property var workspaceByMonitor: ({})
 
   signal barChosen(string output, string position)
   signal notificationsChosen(string output, string position, string align)
   signal monitorChosen(string output)
-  signal workspaceChosen(string workspaceId)
 
   readonly property int canvasHeight: Style.space(240)
   readonly property int canvasPad: Style.space(4)
@@ -190,10 +188,12 @@ Item {
 
   Process {
     id: workspaceRulesProc
-    onStarted: { stdoutBuf = ""; stderrBuf = "" }
+    onStarted: stdoutBuf = ""
+    onExited: function(exitCode) {
+      if (exitCode === 0) root.workspaceByMonitor = root.parseWorkspaceRules(stdoutBuf)
+    }
 
     property string stdoutBuf: ""
-    property string stderrBuf: ""
     command: ["/usr/bin/hyprctl", "workspacerules", "-j"]
     stdout: SplitParser {
       splitMarker: ""
@@ -207,13 +207,9 @@ Item {
     }
   }
 
-  Timer {
-    interval: 30000
-    running: root.showWorkspaces
-    repeat: true
-    onTriggered: root.refreshWorkspaceRules()
-  }
-
+  // Rules only change with the Hyprland config, so reading them each time the
+  // panel opens is enough.
+  onEnabledChanged: if (enabled) refreshWorkspaceRules()
   Component.onCompleted: refreshWorkspaceRules()
 
   Item {
@@ -332,16 +328,6 @@ Item {
                         font.pixelSize: Style.font.caption
                         font.bold: focused
                         opacity: root.secondaryOpacity
-                      }
-
-                      MouseArea {
-                        anchors.fill: parent
-                        enabled: root.workspaceClickable
-                        hoverEnabled: root.workspaceClickable
-                        cursorShape: root.workspaceClickable
-                          ? Qt.PointingHandCursor
-                          : Qt.ArrowCursor
-                        onClicked: root.workspaceChosen(wsId)
                       }
                     }
                   }

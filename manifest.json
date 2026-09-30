@@ -18,11 +18,11 @@
   },
   "barWidget": {
     "displayName": "Monitors",
-    "description": "Brightness, scale, and bar or notification layout per monitor",
+    "description": "Text size, and bar or notification layout per monitor",
     "category": "System",
     "allowMultiple": false
   },
   "omarchy": {
-    "clonedFrom": "omarchy.monitors"
+    "clonedFrom": "omarchy.notifications"
   }
 }

@@ -5,97 +5,36 @@ function isChromiumDerived(app, appIcon) {
          source.indexOf("opera") >= 0
 }
 
-// True when a `<...>` run is an image tag, so the name is read the way Qt's
-// parser reads it: after the `<`, the leading run of letters and digits.
-//
-// Skip everything up to that run rather than matching the separator, because
-// there is no JavaScript expression for what Qt skips. QQuickStyledText calls
-// skipSpace(), which is QChar::isSpace(), and that set is not `\s`: Qt counts
-// U+0085 NEL and `\s` does not, while `\s` counts U+FEFF and Qt does not. A
-// name read with `\s` therefore misses a tag written as `<`, U+0085, `img`:
-// Qt skips the NEL, reads `img` and issues the GET, while the regex finds no
-// name at all and the tag is kept. Measured against Qt 6.11.2.
-//
-// Over-skipping is the safe direction. It can only classify more runs as
-// images, and dropping a run never manufactures a tag: a dropped run joins two
-// stretches of text that each contain no `<`.
-function isImageTag(tag) {
-  var name = /^<[^A-Za-z0-9]*([A-Za-z0-9]+)/.exec(tag)
-  return !!name && name[1].toLowerCase() === "img"
-}
-
-// The body renders as StyledText so notifications can use the markup the
-// body-markup capability advertises (see Service.qml). StyledText honours
-// <img src>, and a remote src makes the shell issue an unauthenticated GET
-// with no user action, so image tags go before the renderer sees them.
-//
-// Work in whole tags, never in substrings of one. A `<` opens a tag that runs
-// to the next `>`, nested `<` and all, and only a tag whose own name is `img`
-// is dropped.
-//
-// That is the conservative bound, not Qt's exact one: Qt lets a `>` inside a
-// quoted attribute value pass without closing the tag, so a Qt tag can be
-// longer than the run taken here. Do not "correct" this to match Qt. Taking
-// the shorter run only ever splits one Qt tag into several, and a split can
-// only expose an `<img` to be dropped, never hide one — whereas honouring
-// quotes would let `<b title="a>b"><img src="http://host/x.png">` through.
-//
-// Deleting a substring is what makes a naive `/<img[^>]*>/g` unsafe. Given
-//
-//   <im<img src="http://a/decoy.png">g src="http://a/beacon.png">
-//
-// Qt reads ONE malformed tag named `im` and renders nothing, but removing the
-// inner match closes the surviving halves up into `<img src=".../beacon.png">`
-// — a live tag the input never contained. The stripper would be manufacturing
-// the very thing it exists to remove.
-//
-// Because every `<` opens a tag, the text between tags never contains one, so
-// dropping a tag cannot splice its neighbours into a new one. That makes a
-// single pass sufficient, with no re-scanning and no input bound to police.
-function stripImageTags(text) {
-  var out = ""
-  var i = 0
-
-  while (i < text.length) {
-    var open = text.indexOf("<", i)
-    if (open === -1) {
-      out += text.slice(i)
-      break
-    }
-
-    out += text.slice(i, open)
-
-    // An unterminated tag at the end of the string still reaches the renderer,
-    // which closes it itself, so treat the remainder as one tag.
-    var close = text.indexOf(">", open)
-    var tag = close === -1 ? text.slice(open) : text.slice(open, close + 1)
-
-    if (!isImageTag(tag)) out += tag
-    i = close === -1 ? text.length : close + 1
-  }
-
-  return out
-}
-
-// What the card renders, and the last thing to touch the string before Qt parses
-// it. The newline rewrite belongs here rather than in the card because it inserts
-// `<br/>` into text stripImageTags chose to KEEP, and a kept tag may hold a `<` of
-// its own: `<x`, newline, `<img src="http://…">` is one tag named `x` to both the
-// stripper and Qt, until the rewrite splits it into `<x<br/>` and a live image tag
-// the input never contained. Measured against Qt 6.11.2 — the rewritten form
-// fetches, the original does not. So strip again after, and what Qt parses is what
-// was checked last.
-function styledBody(body, app, appIcon) {
-  return stripImageTags(sanitizeBody(body, app, appIcon).replace(/\r\n|\r|\n/g, "<br/>"))
-}
-
+// Chromium-family senders prefix the body with the page's origin, as a bare
+// URL or wrapped in a link.
 function sanitizeBody(body, app, appIcon) {
-  var text = stripImageTags(String(body || ""))
+  var text = String(body || "")
   if (!isChromiumDerived(app, appIcon)) return text
 
   return text
     .replace(/^\s*<a\b[^>]*>\s*(?:https?:\/\/|www\.)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?(?:\/[^<\s]*)?\s*<\/a>\s*/i, "")
     .replace(/^\s*(?:https?:\/\/|www\.)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?(?:\/\S*)?\s+/i, "")
+}
+
+var ENTITIES = { amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'", nbsp: " " }
+
+function decodeEntity(match, name) {
+  var key = String(name).toLowerCase()
+  if (key.charAt(0) === "#") {
+    var code = key.charAt(1) === "x" ? parseInt(key.slice(2), 16) : parseInt(key.slice(1), 10)
+    return isFinite(code) && code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : match
+  }
+  return ENTITIES.hasOwnProperty(key) ? ENTITIES[key] : match
+}
+
+// The body renders as PlainText. The server advertises body markup, so senders
+// escape literal `<` and `&`; what is left of the markup collapses to its text
+// here, with line-break tags kept as newlines.
+function plainBody(body, app, appIcon) {
+  return sanitizeBody(body, app, appIcon)
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]*>/g, "")
+    .replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z]+);/gi, decodeEntity)
 }
 
 function summaryStartsWithGlyph(summary) {
@@ -223,6 +162,21 @@ function popupRowChanged(row, updated) {
   return false
 }
 
+// The same message from the same sender under a new id. A web app open in
+// several tabs fires one notification per tab for a single reminder, which
+// the user means as one toast. The image and click target count too: every
+// screen recording toast shares its text but opens a different file.
+var DUPLICATE_ROLES = ["app", "summary", "body", "image", "execArgv"]
+
+function isDuplicatePopup(row, snapshot) {
+  if (!row || !snapshot || row.originalId === snapshot.originalId) return false
+  for (var i = 0; i < DUPLICATE_ROLES.length; i++) {
+    var role = DUPLICATE_ROLES[i]
+    if ((row[role] || "") !== (snapshot[role] || "")) return false
+  }
+  return true
+}
+
 // A client updating a notification through replaces_id keeps the identity of
 // the popup it took over: the file name is the timestamp and id the popup was
 // first persisted under, and the restore, replace and archive paths all key
@@ -325,6 +279,12 @@ function localImageFile(value) {
   return s.charAt(0) === "/" ? s : ""
 }
 
+// Package-owned files outlive the notification, and the copy helper only
+// accepts files the user owns, so these keep their original path.
+function isSystemImage(path) {
+  return /^\/(usr|opt)\//.test(path) || path.indexOf("/var/lib/flatpak/") === 0
+}
+
 // The entry as it should hit the disk, plus the copies that make it true.
 // File-backed images redirect to their copy under imagesDir; dead image://
 // URLs drop to "" (the card falls back to the app icon). Already-redirected
@@ -339,7 +299,7 @@ function persistablePopup(entry, imagesDir) {
     var value = String(out[role] || "")
     if (!value) continue
     var source = localImageFile(value)
-    if (source) {
+    if (source && !isSystemImage(source)) {
       var copy = String(imagesDir || "") + imageStem(e) + "-" + role
       if (source !== copy) copies.push({ from: source, to: copy })
       out[role] = "file://" + copy
@@ -395,214 +355,6 @@ function popupExpired(entry, duration, now) {
   return (Number(now) - Number((entry || {}).timestamp || 0)) >= lifetime
 }
 
-function popupPlacement(barPosition, barClearance, gapsOut) {
-  var position = String(barPosition || "top")
-  var clearance = Number(barClearance)
-  var gap = Number(gapsOut)
-  if (!isFinite(clearance)) clearance = 0
-  if (!isFinite(gap)) gap = 0
-
-  return {
-    anchors: { top: true, bottom: false, left: false, right: true },
-    margins: {
-      top: position === "top" ? clearance : gap,
-      bottom: gap,
-      left: gap,
-      right: position === "right" ? clearance : gap
-    }
-  }
-}
-
-function normalizeBarEdge(edge) {
-  var value = String(edge || "top").toLowerCase()
-  if (value === "bottom" || value === "left" || value === "right") return value
-  return "top"
-}
-
-function normalizeAlign(align) {
-  var value = String(align || "right").toLowerCase()
-  if (value === "left") return "left"
-  if (value === "center" || value === "middle" || value === "centre") return "center"
-  return "right"
-}
-
-function normalizeNotificationPlacements(placements, legacyOutput, legacyPosition, options) {
-  options = options || {}
-  var out = []
-  if (Array.isArray(placements)) {
-    for (var i = 0; i < placements.length; i++) {
-      var entry = placements[i]
-      if (!entry) continue
-      var output = String(entry.output || "").trim()
-      if (!output) continue
-      out.push({
-        output: output,
-        position: String(entry.position || "top") === "bottom" ? "bottom" : "top",
-        align: normalizeAlign(entry.align)
-      })
-    }
-  }
-  if (out.length === 0 && legacyOutput) {
-    out.push({
-      output: String(legacyOutput).trim(),
-      position: String(legacyPosition || "top") === "bottom" ? "bottom" : "top",
-      align: "right"
-    })
-  }
-  return out
-}
-
-function normalizeBarPlacements(placements, legacyOutput, legacyPosition) {
-  var out = []
-  if (Array.isArray(placements)) {
-    for (var i = 0; i < placements.length; i++) {
-      var entry = placements[i]
-      if (!entry) continue
-      var output = String(entry.output || "").trim()
-      if (!output) continue
-      out.push({
-        output: output,
-        position: normalizeBarEdge(entry.position)
-      })
-    }
-  }
-  if (out.length === 0 && legacyOutput) {
-    out.push({
-      output: String(legacyOutput).trim(),
-      position: normalizeBarEdge(legacyPosition)
-    })
-  }
-  return out
-}
-
-function dedupeNotificationPlacements(placements) {
-  var seen = {}
-  var out = []
-  for (var i = placements.length - 1; i >= 0; i--) {
-    var p = placements[i]
-    if (!p) continue
-    var name = String(p.output || "")
-    if (!name || seen[name]) continue
-    seen[name] = true
-    out.unshift(p)
-  }
-  return out
-}
-
-function dedupeBarPlacements(placements) {
-  var seen = {}
-  var out = []
-  for (var i = placements.length - 1; i >= 0; i--) {
-    var p = placements[i]
-    if (!p) continue
-    var name = String(p.output || "")
-    if (!name || seen[name]) continue
-    seen[name] = true
-    out.unshift(p)
-  }
-  return out
-}
-
-function screenNames(screens) {
-  var out = []
-  if (!screens) return out
-  for (var i = 0; i < screens.length; i++) {
-    if (screens[i] && screens[i].name)
-      out.push(String(screens[i].name))
-  }
-  return out
-}
-
-function findNotificationPlacement(placements, output) {
-  var name = String(output || "")
-  for (var i = 0; i < placements.length; i++) {
-    var p = placements[i]
-    if (p && String(p.output) === name)
-      return p
-  }
-  return null
-}
-
-function findBarPlacement(placements, output) {
-  var name = String(output || "")
-  for (var i = 0; i < placements.length; i++) {
-    var p = placements[i]
-    if (p && String(p.output) === name)
-      return p
-  }
-  return null
-}
-
-function readNotificationPlacements(shellConfig, screens) {
-  var config = shellConfig || {}
-  var bar = config.bar || {}
-  var notifications = config.notifications || {}
-  // Owned by this plugin: scoped mutateShellConfig can persist the bar
-  // subtree, not notifications.*. Prefer that once it exists.
-  if (Array.isArray(bar.notificationPlacements)) {
-    return dedupeNotificationPlacements(normalizeNotificationPlacements(
-      bar.notificationPlacements,
-      null,
-      null,
-      { preserveAlign: true }
-    ))
-  }
-  if (Array.isArray(notifications.placements)) {
-    return dedupeNotificationPlacements(normalizeNotificationPlacements(
-      notifications.placements,
-      notifications.output,
-      notifications.position,
-      { preserveAlign: true }
-    ))
-  }
-  var legacy = dedupeNotificationPlacements(normalizeNotificationPlacements(
-    null,
-    notifications.output,
-    notifications.position,
-    { preserveAlign: true }
-  ))
-  if (legacy.length > 0) return legacy
-  var names = screenNames(screens)
-  var out = []
-  for (var i = 0; i < names.length; i++) {
-    out.push({ output: names[i], position: "top", align: "right" })
-  }
-  return out
-}
-
-function readBarPlacements(shellConfig) {
-  var config = shellConfig || {}
-  var bar = config.bar || {}
-  return dedupeBarPlacements(normalizeBarPlacements(
-    bar.placements,
-    bar.output,
-    bar.position
-  ))
-}
-
-function popupPlacementForScreen(notificationPlacement, barPlacement, barClearance, gapsOut) {
-  if (!notificationPlacement) return null
-  var vertical = String(notificationPlacement.position || "top") === "bottom" ? "bottom" : "top"
-  var align = normalizeAlign(notificationPlacement.align)
-  var barEdge = barPlacement ? normalizeBarEdge(barPlacement.position) : ""
-  var clearance = Number(barClearance)
-  var gap = Number(gapsOut)
-  if (!isFinite(clearance)) clearance = 0
-  if (!isFinite(gap)) gap = 0
-
-  var margins = { top: gap, bottom: gap, left: gap, right: gap }
-  if (vertical === "top" && barEdge === "top") margins.top = clearance
-  if (vertical === "bottom" && barEdge === "bottom") margins.bottom = clearance
-  if (align === "right" && barEdge === "right") margins.right = clearance
-  if (align === "left" && barEdge === "left") margins.left = clearance
-
-  return {
-    vertical: vertical,
-    align: align,
-    margins: margins
-  }
-}
-
 // The archived files are the history. They are read back exactly like the
 // live popup files, then normalized into history rows: replaying a toast
 // must not inherit the original's expire timeout or restore deadline, so it
@@ -634,43 +386,4 @@ function historyRows(raw, liveRows, normalUrgency, limit) {
   collect(parsePopupFiles(raw, normalUrgency))
   out.sort(function(a, b) { return (b.timestamp || 0) - (a.timestamp || 0) })
   return out.slice(0, max)
-}
-
-if (typeof module !== "undefined") {
-  module.exports = {
-    isChromiumDerived: isChromiumDerived,
-    sanitizeBody: sanitizeBody,
-    styledBody: styledBody,
-    summaryStartsWithGlyph: summaryStartsWithGlyph,
-    shouldBypassDnd: shouldBypassDnd,
-    isEphemeralApp: isEphemeralApp,
-    stringHint: stringHint,
-    glyphFromHints: glyphFromHints,
-    execArgvFromHints: execArgvFromHints,
-    parseExecArgv: parseExecArgv,
-    shouldRenderCompactGlyph: shouldRenderCompactGlyph,
-    snapshotOf: snapshotOf,
-    popupRoles: popupRoles,
-    popupRowChanged: popupRowChanged,
-    replacementSnapshot: replacementSnapshot,
-    historyEntry: historyEntry,
-    parseSettings: parseSettings,
-    historyRows: historyRows,
-    popupEntry: popupEntry,
-    popupFileName: popupFileName,
-    imageStem: imageStem,
-    localImageFile: localImageFile,
-    persistablePopup: persistablePopup,
-    serializePopup: serializePopup,
-    parsePopupFiles: parsePopupFiles,
-    popupExpired: popupExpired,
-    popupPlacement: popupPlacement,
-    normalizeAlign: normalizeAlign,
-    normalizeBarEdge: normalizeBarEdge,
-    findNotificationPlacement: findNotificationPlacement,
-    findBarPlacement: findBarPlacement,
-    readNotificationPlacements: readNotificationPlacements,
-    readBarPlacements: readBarPlacements,
-    popupPlacementForScreen: popupPlacementForScreen
-  }
 }
